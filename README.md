@@ -70,8 +70,33 @@ microk8s enable grafana
 12. **Monitor and iterate**: Continuously monitor the performance of your application and the RL agent's autoscaling decisions, making adjustments as necessary to improve efficiency and cost-effectiveness.
 13. **Documentation**: Refer to the provided documentation for detailed instructions on each step, including configuration files, deployment scripts, and performance metrics.
 14. **Contribute**: If you find this project useful, consider contributing by submitting issues, pull requests, or feedback to improve the solution further.
+----
+# For MacOs user 
+
+>[!NOTE]
+> **Note**: For MacOS users, you may need to install MicroK8s using Multipass or Docker Desktop. Follow the instructions below for your OS.
 
 
+1. Install Multipass (macOS Virtualization Layer)
+```sh
+# Install via Homebrew (recommended)
+brew install --cask multipass
+
+# Verify installation
+multipass version
+```
+2. Launch a MicroK8s VM with Multipass
+```sh
+# Create a dedicated VM (4GB RAM, 20GB disk)
+multipass launch --name microk8s-vm --mem 4G --disk 20G
+
+# Install MicroK8s inside the VM
+multipass exec microk8s-vm -- sudo snap install microk8s --classic
+
+# Add your user to the microk8s group
+multipass exec microk8s-vm -- sudo usermod -a -G microk8s ubuntu
+
+```
 
 ## Project Structure
 ```plaintext
@@ -103,7 +128,7 @@ microk8s-rl-autoscaling/
 ```
 
 
-## Solution 2: Manually Install Grafana (If Addon is Missing)
+## Solution Manually Install Grafana (If Addon is Missing)
 If Grafana is still not available as an addon, you can deploy it manually using Helm or YAML.
 
 Option A: Install Grafana via Helm
