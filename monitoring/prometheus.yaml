@@ -1,0 +1,27 @@
+# monitoring/prometheus-adapter-config.yaml
+# monitoring/prometheus.yaml
+apiVersion: monitoring.coreos.com/v1  # Required
+kind: Prometheus                       # Required
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  serviceAccountName: prometheus
+  serviceMonitorSelector:
+    matchLabels:
+      app: prometheus
+  resources:
+    requests:
+      memory: 400Mi
+spec:
+  ruleSelector:
+    matchLabels:
+      role: alert-rules
+  additionalScrapeConfigs:
+    - job_name: 'nginx-exporter'
+      scrape_interval: 15s
+      static_configs:
+        - targets: ['nginx-exporter:9113']
+
+ruleFiles:
+  - /nginx_rules.yml
