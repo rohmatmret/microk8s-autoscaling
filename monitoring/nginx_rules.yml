@@ -1,0 +1,11 @@
+# monitoring/nginx-rules.yaml
+groups:
+- name: nginx-alerts
+  rules:
+  - alert: HighNginxLatency
+    expr: histogram_quantile(0.95, rate(nginx_http_request_duration_seconds_bucket[1m])) > 1
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High latency detected on Nginx ({{ $value }}s)"
