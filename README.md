@@ -101,3 +101,38 @@ microk8s-rl-autoscaling/
 |- Makefile                    # Build automation (opsional)
 └── LICENSE                     # Lisensi proyek
 ```
+
+
+## Solution 2: Manually Install Grafana (If Addon is Missing)
+If Grafana is still not available as an addon, you can deploy it manually using Helm or YAML.
+
+Option A: Install Grafana via Helm
+
+1. Enable Helm in MicroK8s:
+
+```sh
+microk8s enable helm
+```
+
+2. Add the Grafana Helm repo:
+
+```sh
+microk8s helm repo add grafana https://grafana.github.io/helm-charts
+microk8s helm repo update
+```
+
+3. Install Grafana:
+```sh
+microk8s helm install grafana grafana/grafana -n monitoring --create-namespace
+```
+
+4. Get the admin password:
+
+```sh
+microk8s kubectl get secret -n monitoring grafana -o jsonpath='{.data.admin-password}' | base64 --decode
+```
+5. Port-forward to access Grafana:
+```sh
+microk8s kubectl port-forward -n monitoring svc/grafana 3000:80
+```
+Access at http://localhost:3000 (Username: admin, Password from Step 4).
