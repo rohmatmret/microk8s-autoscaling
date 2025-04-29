@@ -2,8 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nginx-deployment
+  namespace: default
 spec:
-  replicas: 1  # we can scale this up later
+  replicas: 1
   selector:
     matchLabels:
       app: nginx
@@ -13,27 +14,47 @@ spec:
         app: nginx
     spec:
       containers:
-      - name: nginx
-        image: nginx:latest
-        ports:
-        - containerPort: 80
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "128Mi"
-          limits:
-            cpu: "500m"
-            memory: "256Mi"
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config-volume
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+        - name: nginx-exporter
+          image: nginx/nginx-prometheus-exporter:latest
+          args:
+             - "-nginx.scrape-uri=http://nginx-service:80/nginx_status"
+          ports:
+            - containerPort: 9113
+      volumes:
+        - name: nginx-config-volume
+          configMap:
+            name: nginx-config
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: nginx-service
+  namespace: default
+  labels:
+    app: nginx
 spec:
   selector:
     app: nginx
   ports:
-    - protocol: TCP
+    - name: web
       port: 80
       targetPort: 80
+    - name: metrics
+      port: 9113
+      targetPort: 9113
   type: ClusterIP

@@ -57,7 +57,7 @@ done
 # Apply deployment with retries
 log "🚀 Deploying to MicroK8s..."
 for attempt in $(seq 1 $KUBECTL_RETRIES); do
-    if microk8s kubectl apply -f deployments/nginx-deployment.yaml >> "$LOG_DIR/kubectl.log" 2>&1; then
+    if kubectl apply -f deployments/nginx-deployment.yaml >> "$LOG_DIR/kubectl.log" 2>&1; then
         log "✅ Deployment applied!"
         break
     fi
@@ -65,12 +65,31 @@ for attempt in $(seq 1 $KUBECTL_RETRIES); do
     sleep $KUBECTL_RETRY_DELAY
     if [[ $attempt -eq $KUBECTL_RETRIES ]]; then
         log "❌ Deployment failed after $KUBECTL_RETRIES attempts! Trying with --validate=false..."
-        if ! microk8s kubectl apply -f deployments/nginx-deployment.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
+
+          if !kubectl apply -f config/nginx-config.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
+            log "❌ Deployment ConfigMap still failed! Check $LOG_DIR/kubectl.log and $LOG_DIR/microk8s_inspect.log"
+            microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+            exit 1 
+        fi
+        log "✅ Succes Deployment ConfigMap"
+        
+        if ! kubectl apply -f deployments/nginx-deployment.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
             log "❌ Deployment still failed! Check $LOG_DIR/kubectl.log and $LOG_DIR/microk8s_inspect.log"
             microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
             exit 1
         fi
+
         log "✅ Deployment applied with --validate=false"
+
+      
+
+        if !kubectl apply -f monitoring/nginx-servicemonitor.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
+            log "❌ Deployment ServiceMonitor still failed! Check $LOG_DIR/kubectl.log and $LOG_DIR/microk8s_inspect.log"
+            microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+            exit 1
+        fi
+        log "✅ Succes Deployment ServiceMonitor"
+
     fi
 done
 
@@ -78,7 +97,7 @@ done
 log "⌛ Waiting for pods to become Running..."
 start_time=$(date +%s)
 while [[ $(( $(date +%s) - start_time )) -lt $TIMEOUT ]]; do
-    pods=$(microk8s kubectl get pods -n default -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null)
+    pods=$(kubectl get pods -n default -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null)
     if echo "$pods" | grep -v -E "Pending|ContainerCreating|Error|CrashLoopBackOff" | grep -q "Running"; then
         log "✅ Pods are running!"
         break
@@ -87,8 +106,8 @@ while [[ $(( $(date +%s) - start_time )) -lt $TIMEOUT ]]; do
 done
 if [[ $(( $(date +%s) - start_time )) -ge $TIMEOUT ]]; then
     log "❌ Timeout waiting for pods to be Running!"
-    microk8s kubectl get pods -n default >> "$LOG_DIR/kubectl.log" 2>&1
-    microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+    kubectl get pods -n default >> "$LOG_DIR/kubectl.log" 2>&1
+    inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
     exit 1
 fi
 
@@ -106,36 +125,45 @@ python agent/"$AGENT".py >> "$LOG_DIR/$AGENT.log" 2>&1 &
 AGENT_PID=$!
 log "📝 Agent PID: $AGENT_PID"
 
+
+# Start port forwarding for Grafana
+# log "📡 Starting Grafana port-forward..."
+# if !kubectl get svc -n monitoring grafana >/dev/null 2>&1; then
+#     log "❌ Grafana service not found in monitoring namespace!"
+#     exit 1
+# fi
+
 # Optionally start load test
 if [[ "$SKIP_LOADTEST" == "false" ]]; then
     log "📊 Running load test with k6..."
-    if ! command -v k6 >/dev/null; then
-        log "❌ k6 not found! Run scripts/install_microk8s.sh to install."
+    
+    # Create/update ConfigMap with k6 script
+    kubectl create configmap k6-load-script --from-file=load-test/load-test.js
+
+    log "Apply Job k6"
+    # Apply k6 Job YAML (make sure deployments/k6-job.yaml exists)
+    if [[ ! -f "deployments/k6-job.yaml" ]]; then
+        log "❌ k6-job.yaml not found in deployments/"
         exit 1
     fi
-    if [[ ! -f "load-test/loadtest.js" ]]; then
-        log "❌ Load test script load-test/loadtest.js not found!"
-        exit 1
-    fi
-    k6 run load-test/loadtest.js >> "$LOG_DIR/k6.log" 2>&1 &
-    K6_PID=$!
-    log "📝 k6 PID: $K6_PID"
+
+    kubectl apply -f deployments/k6-job.yaml >> "$LOG_DIR/kubectl.log" 2>&1
+    log "✅ k6 load test job applied!"
+
+    # k6 run load-test/loadtest.js >> "$LOG_DIR/k6.log" 2>&1 &
+    # K6_PID=$!
+    # log "📝 k6 PID: $K6_PID"
 else
     log "⚠️ Load testing skipped."
 fi
 
-# Start port forwarding for Grafana
-log "📡 Starting Grafana port-forward..."
-if ! microk8s kubectl get svc -n monitoring grafana >/dev/null 2>&1; then
-    log "❌ Grafana service not found in monitoring namespace!"
-    exit 1
-fi
 # Check if port is in use
 # if lsof -i :"$GRAFANA_PORT" >/dev/null; then
 #     log "❌ Port $GRAFANA_PORT is already in use! Choose another port or close the process."
 #     exit 1
 # fi
-microk8s kubectl port-forward -n monitoring svc/grafana "$GRAFANA_PORT:$GRAFANA_PORT" >> "$LOG_DIR/grafana.log" 2>&1 &
+
+kubectl port-forward -n observability svc/grafana "$GRAFANA_PORT:$GRAFANA_PORT" >> "$LOG_DIR/grafana.log" 2>&1 &
 GRAFANA_PID=$!
 log "📝 Grafana PID: $GRAFANA_PID"
 
