@@ -73,6 +73,16 @@ microk8s enable grafana
 ----
 # For MacOs user 
 
+## Prerequisites
+
+Before starting, ensure you have the following:
+
+- macOS system with internet access
+- Homebrew installed (`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`)
+- At least 4GB RAM, 2 CPUs, and 20GB disk available for the Multipass VM
+- Basic familiarity with terminal commands and Kubernetes concepts (e.g., pods, deployments, services)
+
+
 >[!NOTE]
 > **Note**: For MacOS users, you may need to install MicroK8s using Multipass or Docker Desktop. Follow the instructions below for your OS.
 
@@ -97,6 +107,44 @@ multipass exec microk8s-vm -- sudo snap install microk8s --classic
 multipass exec microk8s-vm -- sudo usermod -a -G microk8s ubuntu
 
 ```
+## Expected Output:
+```sh
+Name            State             IPv4
+microk8s-vm     Running           192.168.64.x
+
+// If not running: Start it with command
+
+multipass start microk8s-vm.
+
+```
+3. Install MicroK8s in the VM
+Install MicroK8s using snap inside the VM.
+
+```sh
+multipass shell microk8s-vm
+sudo snap install microk8s --classic
+
+```
+### Verify microk8s
+```sh
+microk8s version
+```
+Expected Output: Version information (e.g., MicroK8s v1.x.x).
+
+If it fails: Check internet connectivity in the VM (ping google.com) and retry.
+
+Add the ubuntu user to the microk8s group:
+
+```sh
+sudo usermod -a -G microk8s ubuntu
+```
+Log out and back in to apply group changes:
+
+```sh
+exit
+multipass shell microk8s-vm
+```
+
 
 ## Project Structure
 ```plaintext
@@ -111,7 +159,6 @@ microk8s-rl-autoscaling/
 │   └── environment.py          # Environment for RL
 ├── deployments/                # Konfigurasi Kubernetes  
 │   ├── nginx-deployment.yaml   # Deployment Nginx 
-│   └── prometheus.yml          # Deployment Prometheus
 ├── load-test/                  # load testing for k6
 │   └── loadtest.js             # Simulasi lonjakan trafik  
 ├── monitoring/                 # Konfigurasi Prometheus/Grafana  
@@ -122,6 +169,7 @@ microk8s-rl-autoscaling/
 └── scripts/                    # Skrip utilitas  
     ├── install_microk8s.sh     # Auto-install MicroK8s  
     └── run_simulation.sh     # Jalankan simulasi end-to-end  
+    ├── stop_simulation.sh     # Stop Simulasi
 |── .gitignore                  # Ignore files for Git
 |- Makefile                    # Build automation (opsional)
 └── LICENSE                     # Lisensi proyek
@@ -161,3 +209,11 @@ microk8s kubectl get secret -n monitoring grafana -o jsonpath='{.data.admin-pass
 microk8s kubectl port-forward -n monitoring svc/grafana 3000:80
 ```
 Access at http://localhost:3000 (Username: admin, Password from Step 4).
+
+
+
+## Manual Load Test
+
+```sh
+kubectl create configmap k6-load-script --from-file=load-test/load-test.js
+```
