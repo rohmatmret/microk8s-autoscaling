@@ -4,7 +4,7 @@
 # Usage: sudo bash scripts/run_simulation.sh [dqn|ppo] [true|false]
 # Example: sudo bash scripts/run_simulation.sh ppo false
 
-set -e  # Exit on error
+set -eo pipefail
 
 AGENT=${1:-dqn}
 SKIP_LOADTEST=${2:-false}
@@ -12,17 +12,17 @@ PROJECT_ROOT="$(pwd)"
 VENV_DIR="$PROJECT_ROOT/venv"
 LOG_DIR="$PROJECT_ROOT/logs"
 GRAFANA_PORT=3000
-TIMEOUT=120  # Increased timeout for pod readiness
-KUBECTL_RETRIES=3
-KUBECTL_RETRY_DELAY=10
+TIMEOUT=300  # Increased timeout to 5 minutes
+KUBECTL_RETRIES=5
+KUBECTL_RETRY_DELAY=15
 
 # Create log directory
 mkdir -p "$LOG_DIR"
 
 # Redirect output to log and console
-LOG_FILE="$LOG_DIR/simulation.log"
-exec 3>&1 1>>"$LOG_FILE" 2>&1
-log() { echo "$@" >&3; echo "$@" >> "$LOG_FILE"; }
+LOG_FILE="$LOG_DIR/simulation-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+log() { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $@" | tee -a "$LOG_FILE"; }
 
 # Require sudo
 if [[ $EUID -ne 0 ]]; then
@@ -39,141 +39,256 @@ log "✅ Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
 
 # Verify MicroK8s
-log "🔍 Checking MicroK8s status..."
-for attempt in {1..3}; do
-    if microk8s status --wait-ready --timeout 300 >/dev/null; then
-        log "✅ MicroK8s is ready!"
-        break
-    fi
-    log "⚠️ MicroK8s not ready (attempt $attempt/3). Retrying in 10s..."
-    sleep 10
-    if [[ $attempt -eq 3 ]]; then
-        log "❌ MicroK8s failed to start! Check logs in $LOG_FILE"
-        microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+verify_microk8s() {
+    log "🔍 Checking MicroK8s status..."
+    for attempt in {1..3}; do
+        if microk8s status --wait-ready --timeout $TIMEOUT >/dev/null; then
+            log "✅ MicroK8s is ready!"
+            return 0
+        fi
+        log "⚠️ MicroK8s not ready (attempt $attempt/3). Retrying in 10s..."
+        sleep 10
+    done
+    log "❌ MicroK8s failed to start!"
+    microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+    exit 1
+}
+verify_microk8s
+
+# Enable observability stack
+# Enable observability stack with comprehensive checks
+enable_observability() {
+    log "📊 Configuring observability stack..."
+    
+    # Verify cluster resources first
+    verify_cluster_resources() {
+        local required_cpu=2
+        local required_mem=4096  # 4GB in MB
+        local node_cpu=$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.cpu}' | tr -dc '0-9')
+        local node_mem=$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.memory}' | sed 's/[^0-9]*//g')
+        node_mem=$((node_mem/1024/1024))  # Convert to MB
+
+        if [[ $node_cpu -lt $required_cpu ]] || [[ $node_mem -lt $required_mem ]]; then
+            log "⚠️ Insufficient resources - CPU: ${node_cpu}/${required_cpu}, Memory: ${node_mem}MB/${required_mem}MB"
+            return 1
+        fi
+        return 0
+    }
+
+    # Enable required addons
+    enable_prerequisites() {
+        local addons=("dns" "storage" "helm3")
+        for addon in "${addons[@]}"; do
+            if ! microk8s status | grep -q "$addon: enabled"; then
+                log "🛠 Enabling $addon..."
+                if ! microk8s enable "$addon" >> "$LOG_FILE" 2>&1; then
+                    log "❌ Failed to enable $addon"
+                    return 1
+                fi
+                sleep 10
+            fi
+        done
+        return 0
+    }
+
+    # Main enable function
+    if ! verify_cluster_resources; then
+        log "❌ Cluster lacks sufficient resources for observability stack"
         exit 1
     fi
-done
 
-# Apply deployment with retries
-log "🚀 Deploying to MicroK8s..."
-for attempt in $(seq 1 $KUBECTL_RETRIES); do
-    if kubectl apply -f deployments/nginx-deployment.yaml >> "$LOG_DIR/kubectl.log" 2>&1; then
-        log "✅ Deployment applied!"
-        break
+    if ! enable_prerequisites; then
+        log "❌ Failed to enable prerequisites"
+        exit 1
     fi
-    log "⚠️ Deployment failed (attempt $attempt/$KUBECTL_RETRIES). Retrying in $KUBECTL_RETRY_DELAY seconds..."
-    sleep $KUBECTL_RETRY_DELAY
-    if [[ $attempt -eq $KUBECTL_RETRIES ]]; then
-        log "❌ Deployment failed after $KUBECTL_RETRIES attempts! Trying with --validate=false..."
 
-          if !kubectl apply -f config/nginx-config.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
-            log "❌ Deployment ConfigMap still failed! Check $LOG_DIR/kubectl.log and $LOG_DIR/microk8s_inspect.log"
-            microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
-            exit 1 
+    if microk8s status | grep -q "observability: enabled"; then
+        log "ℹ️ Observability stack already enabled"
+        # Ensure all components are running
+        microk8s disable observability >> "$LOG_FILE" 2>&1
+        sleep 15
+    fi
+
+    log "🚀 Enabling observability stack..."
+    if ! microk8s enable observability \
+        --extra-args "--set prometheus.prometheusSpec.resources.limits.memory=2Gi \
+                     --set grafana.resources.limits.memory=1Gi" >> "$LOG_FILE" 2>&1; then
+        log "❌ Failed to enable observability"
+        microk8s inspect >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
+
+    log "⌛ Waiting for components to start (timeout: ${TIMEOUT}s)..."
+    
+    # Wait for CRDs to be established
+    if ! kubectl wait --for condition=established --timeout=${TIMEOUT}s \
+        crd/prometheuses.monitoring.coreos.com \
+        crd/servicemonitors.monitoring.coreos.com >> "$LOG_FILE" 2>&1; then
+        log "❌ CRDs failed to initialize"
+        exit 1
+    fi
+
+    # Check all observability pods
+    local components=(
+        "app.kubernetes.io/name=grafana"
+        "app.kubernetes.io/name=prometheus"
+        "app.kubernetes.io/name=alertmanager"
+        "app.kubernetes.io/name=kube-state-metrics"
+    )
+
+    for component in "${components[@]}"; do
+        if ! kubectl wait --for=condition=ready pod -l "$component" -n observability \
+            --timeout=${TIMEOUT}s >> "$LOG_FILE" 2>&1; then
+            log "❌ $component failed to start"
+            kubectl describe pod -l "$component" -n observability >> "$LOG_FILE"
+            kubectl logs -l "$component" -n observability >> "$LOG_FILE"
+            exit 1
         fi
-        log "✅ Succes Deployment ConfigMap"
+    done
+
+    # Verify Grafana is fully operational
+    if ! kubectl exec -n observability $(kubectl get pods -n observability -l app.kubernetes.io/name=grafana -o jsonpath='{.items[0].metadata.name}') \
+        -- curl -s http://localhost:3000/api/health | grep -q '"database":"ok"'; then
+        log "❌ Grafana health check failed"
+        exit 1
+    fi
+
+    log "✅ Observability stack is fully operational"
+    log "   - Grafana: http://localhost:3000 (admin/$(kubectl get secret -n observability kube-prom-stack-grafana -o jsonpath='{.data.admin-password}' | base64 --decode))"
+    log "   - Prometheus: http://localhost:9090"
+    log "   - Alertmanager: http://localhost:9093"
+}
+
+enable_observability
+
+# Deploy application
+deploy_application() {
+    log "🚀 Deploying application..."
+    
+    DEPLOYMENT_FILES=(
+        "config/nginx-config.yaml"
+        "deployments/nginx-deployment.yaml"
+        "monitoring/nginx-servicemonitor.yaml"
+    )
+
+    # Verify files exist
+    for file in "${DEPLOYMENT_FILES[@]}"; do
+        if [[ ! -f "$file" ]]; then
+            log "❌ Missing file: $file"
+            exit 1
+        fi
+    done
+
+    # Apply with retries
+    for attempt in $(seq 1 $KUBECTL_RETRIES); do
+        SUCCESS=true
+        for file in "${DEPLOYMENT_FILES[@]}"; do
+            if ! kubectl apply -f "$file" >> "$LOG_DIR/kubectl.log" 2>&1; then
+                log "⚠️ Failed to apply $file (attempt $attempt/$KUBECTL_RETRIES)"
+                SUCCESS=false
+                if [[ $attempt -eq $KUBECTL_RETRIES ]]; then
+                    log "🔄 Trying with --validate=false..."
+                    if ! kubectl apply -f "$file" --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
+                        log "❌ Critical failure applying $file"
+                        exit 1
+                    fi
+                else
+                    break
+                fi
+            fi
+        done
         
-        if ! kubectl apply -f deployments/nginx-deployment.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
-            log "❌ Deployment still failed! Check $LOG_DIR/kubectl.log and $LOG_DIR/microk8s_inspect.log"
-            microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
-            exit 1
+        if $SUCCESS; then
+            log "✅ All deployments applied successfully"
+            break
         fi
+        [[ $attempt -lt $KUBECTL_RETRIES ]] && sleep $KUBECTL_RETRY_DELAY
+    done
 
-        log "✅ Deployment applied with --validate=false"
-
-      
-
-        if !kubectl apply -f monitoring/nginx-servicemonitor.yaml --validate=false >> "$LOG_DIR/kubectl.log" 2>&1; then
-            log "❌ Deployment ServiceMonitor still failed! Check $LOG_DIR/kubectl.log and $LOG_DIR/microk8s_inspect.log"
-            microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
-            exit 1
-        fi
-        log "✅ Succes Deployment ServiceMonitor"
-
+    # Wait for pods
+    log "⌛ Waiting for application pods..."
+    if ! kubectl wait --for=condition=ready pod -l app=nginx --timeout=$TIMEOUT >> "$LOG_FILE" 2>&1; then
+        log "❌ Application pods failed to start!"
+        kubectl describe pods -l app=nginx >> "$LOG_FILE"
+        exit 1
     fi
-done
-
-# Wait for pods to be Running
-log "⌛ Waiting for pods to become Running..."
-start_time=$(date +%s)
-while [[ $(( $(date +%s) - start_time )) -lt $TIMEOUT ]]; do
-    pods=$(kubectl get pods -n default -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null)
-    if echo "$pods" | grep -v -E "Pending|ContainerCreating|Error|CrashLoopBackOff" | grep -q "Running"; then
-        log "✅ Pods are running!"
-        break
-    fi
-    sleep 2
-done
-if [[ $(( $(date +%s) - start_time )) -ge $TIMEOUT ]]; then
-    log "❌ Timeout waiting for pods to be Running!"
-    kubectl get pods -n default >> "$LOG_DIR/kubectl.log" 2>&1
-    inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
-    exit 1
-fi
+    log "✅ Application pods are running"
+}
+deploy_application
 
 # Start RL agent
-log "🧠 Launching Reinforcement Learning Agent [$AGENT]..."
-if [[ "$AGENT" != "dqn" && "$AGENT" != "ppo" ]]; then
-    log "❌ Invalid agent: $AGENT. Use 'dqn' or 'ppo'."
-    exit 1
-fi
-if [[ ! -f "agent/$AGENT.py" ]]; then
-    log "❌ Agent script agent/$AGENT.py not found!"
-    exit 1
-fi
-python agent/"$AGENT".py >> "$LOG_DIR/$AGENT.log" 2>&1 &
-AGENT_PID=$!
-log "📝 Agent PID: $AGENT_PID"
-
-
-# Start port forwarding for Grafana
-# log "📡 Starting Grafana port-forward..."
-# if !kubectl get svc -n monitoring grafana >/dev/null 2>&1; then
-#     log "❌ Grafana service not found in monitoring namespace!"
-#     exit 1
-# fi
-
-# Optionally start load test
-if [[ "$SKIP_LOADTEST" == "false" ]]; then
-    log "📊 Running load test with k6..."
-    
-    # Create/update ConfigMap with k6 script
-    kubectl create configmap k6-load-script --from-file=load-test/load-test.js
-
-    log "Apply Job k6"
-    # Apply k6 Job YAML (make sure deployments/k6-job.yaml exists)
-    if [[ ! -f "deployments/k6-job.yaml" ]]; then
-        log "❌ k6-job.yaml not found in deployments/"
+start_agent() {
+    log "🧠 Starting RL Agent [$AGENT]..."
+    if [[ ! -f "agent/$AGENT.py" ]]; then
+        log "❌ Agent script not found: agent/$AGENT.py"
         exit 1
     fi
+    
+    python "agent/$AGENT.py" >> "$LOG_DIR/$AGENT.log" 2>&1 &
+    AGENT_PID=$!
+    log "📝 Agent PID: $AGENT_PID"
+}
+start_agent
 
-    kubectl apply -f deployments/k6-job.yaml >> "$LOG_DIR/kubectl.log" 2>&1
-    log "✅ k6 load test job applied!"
+# Start load test if requested
+start_loadtest() {
+    if [[ "$SKIP_LOADTEST" == "false" ]]; then
+        log "📊 Starting load test..."
+        kubectl create configmap k6-load-script --from-file=load-test/load-test.js -o yaml --dry-run=client | kubectl apply -f - >> "$LOG_FILE" 2>&1
+        
+        if [[ ! -f "deployments/k6-job.yaml" ]]; then
+            log "❌ k6-job.yaml not found!"
+            exit 1
+        fi
+        
+        kubectl apply -f deployments/k6-job.yaml >> "$LOG_FILE" 2>&1
+        log "✅ Load test job started"
+    else
+        log "⚠️ Load testing skipped"
+    fi
+}
+start_loadtest
 
-    # k6 run load-test/loadtest.js >> "$LOG_DIR/k6.log" 2>&1 &
-    # K6_PID=$!
-    # log "📝 k6 PID: $K6_PID"
-else
-    log "⚠️ Load testing skipped."
-fi
+# Start Grafana port-forward
+start_grafana() {
+    log "📡 Starting Grafana port-forward..."
+    if ! kubectl get svc kube-prom-stack-grafana -n observability >> "$LOG_FILE" 2>&1; then
+        log "❌ Grafana service not found!"
+        exit 1
+    fi
+    
+    # Get and log the admin password
+    GRAFANA_PASSWORD=$(kubectl get secret -n observability kube-prom-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode)
+    log "🔑 Grafana admin password: $GRAFANA_PASSWORD"
+    
+    kubectl port-forward -n observability svc/kube-prom-stack-grafana $GRAFANA_PORT:80 >> "$LOG_DIR/grafana.log" 2>&1 &
+    GRAFANA_PID=$!
+    log "📝 Grafana PID: $GRAFANA_PID"
+    log "🔗 Grafana URL: http://localhost:$GRAFANA_PORT (admin/$GRAFANA_PASSWORD)"
+}
+start_grafana
 
-# Check if port is in use
-# if lsof -i :"$GRAFANA_PORT" >/dev/null; then
-#     log "❌ Port $GRAFANA_PORT is already in use! Choose another port or close the process."
-#     exit 1
-# fi
-
-kubectl port-forward -n observability svc/grafana "$GRAFANA_PORT:$GRAFANA_PORT" >> "$LOG_DIR/grafana.log" 2>&1 &
-GRAFANA_PID=$!
-log "📝 Grafana PID: $GRAFANA_PID"
-
+# Main loop
 log "\n✅ Simulation is running!"
-log "🔗 Access Grafana at: http://localhost:$GRAFANA_PORT"
 log "📜 Logs available in: $LOG_DIR"
-log "🛑 To stop, run: sudo make stop or kill $AGENT_PID ${K6_PID:-} $GRAFANA_PID 2>/dev/null"
+log "🛑 To stop: sudo make stop or kill -9 $AGENT_PID $GRAFANA_PID"
 
-# Trap Ctrl+C to clean up
-trap 'log "🛑 Stopping simulation..."; kill $AGENT_PID ${K6_PID:-} $GRAFANA_PID 2>/dev/null; exit 0' INT
+cleanup() {
+    log "🛑 Cleaning up..."
+    kill -9 $AGENT_PID $GRAFANA_PID 2>/dev/null || true
+    exit 0
+}
+trap cleanup INT TERM
 
-# Keep script running to maintain background processes
-wait
+while true; do
+    sleep 60
+    # Verify processes are still running
+    if ! ps -p $AGENT_PID >/dev/null; then
+        log "❌ Agent process died!"
+        exit 1
+    fi
+    if ! ps -p $GRAFANA_PID >/dev/null; then
+        log "❌ Grafana port-forward died!"
+        exit 1
+    fi
+done

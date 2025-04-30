@@ -1,0 +1,83 @@
+@startuml MicroK8s-Full-Architecture
+
+' skinparam monochrome true
+skinparam shadowing false
+skinparam nodesep 15
+skinparam ranksep 25
+
+rectangle "MacOS Host" {
+  rectangle "Multipass VM" {
+    rectangle "MicroK8s Cluster" {
+      component "CoreDNS" as coredns <<DNS>> #FFD700
+      component "Ingress-NGINX" as ingress <<Ingress>> #00BFFF
+      
+      database "Grafana" as grafana #32CD32
+      component "RL Agent" as rl_agent <<PPO/DQN>> #FF69B4
+      database "Prometheus" as prometheus #FFA07A
+      component "Metrics Server" as metrics_server #FFA07A
+      
+      node "Worker Node" {
+        rectangle "Pod: nginx" as nginx {
+          component "nginx-container" as nginx_ctr
+          component "metrics-sidecar" as metrics
+        }
+        
+        rectangle "Pod: k6-loadtest" as k6 {
+          component "k6-container" as k6_ctr
+        }
+        
+        rectangle "HPA" as hpa <<HorizontalPodAutoscaler>> #D3D3D3
+      }
+      
+      node "Control Plane" {
+        component "API Server" as api
+        component "Scheduler" as scheduler
+        component "Controller Manager" as ctrl
+      }
+    }
+  }
+}
+
+' DNS & Ingress Connections
+coredns -right-> ingress : "1. Resolve\nDNS Queries"
+ingress -down-> nginx_ctr : "2. Route Traffic\n(host: nginx.local)"
+
+' Metrics Flow
+nginx_ctr --> metrics : "3. Container Metrics"
+k6_ctr --> metrics : "4. Load Test Metrics"
+metrics --> prometheus : "5. Collect"
+prometheus --> grafana : "6. Visualize"
+prometheus --> rl_agent : "7. Feed Metrics"
+metrics_server --> prometheus : "8. Cluster Metrics"
+
+' RL Decision Flow
+rl_agent --> hpa : "9. Scaling Decisions"
+hpa --> api : "10. Apply Replicas"
+api --> nginx : "11. Scale Pods"
+
+' External Access
+cloud "User" as user
+user -> coredns : "DNS Query"
+user --> ingress : "http://nginx.local"
+user --> grafana : "http://localhost:3000"
+
+' Legend
+legend right
+  | Color       | Component Type       |
+  |------------|----------------------|
+  | #FFD700    | DNS (CoreDNS)        |
+  | #00BFFF    | Ingress Controller   |
+  | #32CD32    | Monitoring           |
+  | #FF69B4    | Reinforcement Learning|
+  | #FFA07A    | Metrics Collection   |
+  | #D3D3D3    | Autoscaling          |
+endlegend
+
+note left of coredns
+  **Enabled MicroK8s Addons:**
+  • microk8s enable dns
+  • microk8s enable ingress
+  • microk8s enable observability
+end note
+
+@enduml

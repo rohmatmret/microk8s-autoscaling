@@ -32,7 +32,7 @@ spec:
         - name: nginx-exporter
           image: nginx/nginx-prometheus-exporter:latest
           args:
-             - "-nginx.scrape-uri=http://nginx-service:80/nginx_status"
+            - "-nginx.scrape-uri=http://127.0.0.1/nginx_status"
           ports:
             - containerPort: 9113
       volumes:
@@ -58,3 +58,24 @@ spec:
       port: 9113
       targetPort: 9113
   type: ClusterIP
+
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-ingress
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx-service
+                port:
+                  number: 80
