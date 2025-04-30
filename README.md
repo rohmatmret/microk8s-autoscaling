@@ -217,3 +217,10 @@ Access at http://localhost:3000 (Username: admin, Password from Step 4).
 ```sh
 kubectl create configmap k6-load-script --from-file=load-test/load-test.js
 ```
+
+
+
+
+# Infrastructure Architecture 
+
+![Local Diagram Infrastructure architecture ](/out/architecture/MicroK8s-Full-Architecture.svg)
