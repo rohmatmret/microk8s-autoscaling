@@ -1,12 +1,16 @@
 # agent/ppo.py
+import datetime
+import argparse
 import os
 import logging
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
+from stable_baselines3.common.env_util import make_vec_env
 import wandb
 from wandb.integration.sb3 import WandbCallback
 from agent.environment import MicroK8sEnv
+from agent.environment_simulated import MicroK8sEnvSimulated
 
 # Configure logging
 logging.basicConfig(
@@ -16,37 +20,84 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+EXP_NAME = "ppo_autoscaling_rewardshape"
+LR = 3e-4
+ENV_NAME = "microk8s_env"
+RUNID = f"{EXP_NAME}_lr{LR:.0e}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+class CustomEvalCallback(EvalCallback):
+    def _on_step(self) -> bool:
+        result = super()._on_step()
+        if result and self.eval_env is not None:
+            # Log additional metrics after each evaluation
+            if hasattr(self, "last_eval_metrics"):
+                wandb.log({
+                    "eval/mean_reward": self.last_eval_metrics["mean_reward"],
+                    "eval/mean_ep_length": self.last_eval_metrics["mean_ep_length"],
+                    "train/global_step": self.num_timesteps
+                })
+                
+        return result
 class PPOAgent:
     """PPO agent for MicroK8s autoscaling."""
 
     def __init__(
         self,
-        env: MicroK8sEnv,
+        environment: MicroK8sEnv,
         learning_rate: float = 0.0003,
         n_steps: int = 2048,
         batch_size: int = 64,
         gamma: float = 0.99,
         model_dir: str = "./models/ppo"
     ):
-        self.env = env
+        self.env = environment
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
 
         # Initialize wandb
         wandb.init(
             project="microk8s_rl_autoscaling",
+            entity="rohmatmret-institute-teknologi-sepuluh-nopember",
+            name=RUNID,
+            id=RUNID,
+            resume="allow",
             config={
+                "algorithm": "PPO",
+                "environment": ENV_NAME,
+                "reward_shaping": True,
                 "learning_rate": learning_rate,
+                "gamma": gamma,
+                "gae_lambda": 0.95,
                 "n_steps": n_steps,
                 "batch_size": batch_size,
-                "gamma": gamma
-            }
+                "n_epochs": 10,
+                "normalize_advantage": True,
+                "ent_coef": 0.0,
+                "clip_range": 0.2,
+                "vf_coef": 0.5,
+                "policy": "MlpPolicy",
+            },
+            tags=["PPO", "autoscaling", "reward shaping", ENV_NAME],
+            notes="Eksperimen dengan reward shaping dan PPO baseline."
         )
+        wandb.define_metric("custom/*", step_metric="train/global_step")
+        wandb.define_metric("train/global_step")
+        wandb.config.update({
+            "custom_metrics": {
+                "target_cpu_range": [0.4, 0.8],
+                "target_memory_range": [0.3, 0.7],
+                "ideal_pod_count": 5
+            }
+        })
+        wandb.Settings(init_timeout=180)
+
+        # Create evaluation environment
+        self.eval_env = make_vec_env(lambda:MicroK8sEnvSimulated(), n_envs=1)
 
         # Initialize PPO model
         self.model = PPO(
             policy="MlpPolicy",
-            env=env,
+            env=self.env,
             learning_rate=learning_rate,
             n_steps=n_steps,
             batch_size=batch_size,
@@ -54,11 +105,13 @@ class PPOAgent:
             gae_lambda=0.95,
             clip_range=0.2,
             n_epochs=10,
-            verbose=1
+            verbose=1,
+            ent_coef=0.01,  # Added entropy coefficient
+            max_grad_norm=0.5,  # Add gradient clipping
         )
         logger.info("Initialized PPO with learning_rate=%.4f, gamma=%.2f", learning_rate, gamma)
 
-    def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000) -> None:
+    def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000, eval_episodes=10) -> None:
         """Train the PPO model."""
         try:
             checkpoint_callback = CheckpointCallback(
@@ -66,13 +119,30 @@ class PPOAgent:
                 save_path=self.model_dir,
                 name_prefix="ppo_model"
             )
+
+            eval_callback = CustomEvalCallback(
+                eval_env=self.eval_env,
+                best_model_save_path=f"{self.model_dir}/best_model",
+                log_path=f"{self.model_dir}/eval_logs",
+                eval_freq=5000,
+                deterministic=True,
+                render=False,
+                n_eval_episodes=eval_episodes
+            )
+
             wandb_callback = WandbCallback(
                 model_save_path=f"{self.model_dir}/wandb",
-                verbose=2
+                verbose=2,
+                log="all",
+                gradient_save_freq=100,
+                model_save_freq=checkpoint_freq,
             )
+
+            callback = CallbackList([checkpoint_callback, eval_callback, wandb_callback])
+
             self.model.learn(
                 total_timesteps=total_timesteps,
-                callback=[checkpoint_callback, wandb_callback],
+                callback=callback,
                 log_interval=10
             )
             self.save()
@@ -82,22 +152,51 @@ class PPOAgent:
             raise
 
     def evaluate(self, episodes: int = 10) -> float:
-        """Evaluate the model and return average reward."""
-        total_rewards = []
+        """Enhanced evaluation with detailed metrics"""
+        metrics = {
+            'rewards': [],
+            'cpu_util': [],
+            'memory_util': [],
+            'pod_counts': [],
+            'scaling_actions': []
+        }
+        
         for episode in range(episodes):
-            obs = self.env.reset()
+            obs, _ = self.env.reset()
             done = False
             episode_reward = 0
+            
             while not done:
                 action, _ = self.model.predict(obs, deterministic=True)
-                obs, reward, done, info = self.env.step(action)
+                obs, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated or truncated
                 episode_reward += reward
-            total_rewards.append(episode_reward)
+                
+                # Collect metrics
+                if 'custom_metrics' in info:
+                    metrics['cpu_util'].append(info['custom_metrics']['cpu_utilization'])
+                    metrics['memory_util'].append(info['custom_metrics']['memory_utilization'])
+                    metrics['pod_counts'].append(info['custom_metrics']['pod_count'])
+                    metrics['scaling_actions'].append(info['custom_metrics']['scaling_action'])
+            
+            metrics['rewards'].append(episode_reward)
             logger.info("Episode %d reward: %.2f", episode + 1, episode_reward)
-        avg_reward = np.mean(total_rewards)
-        wandb.log({"eval_avg_reward": avg_reward})
-        logger.info("Average reward over %d episodes: %.2f", episodes, avg_reward)
-        return avg_reward
+        
+        # Log aggregated metrics
+        wandb.log({
+            "eval/mean_reward": np.mean(metrics['rewards']),
+            "eval/std_reward": np.std(metrics['rewards']),
+            "eval/mean_cpu": np.mean(metrics['cpu_util']),
+            "eval/mean_memory": np.mean(metrics['memory_util']),
+            "eval/mean_pods": np.mean(metrics['pod_counts']),
+            "eval/action_distribution": {
+                "scale_down": metrics['scaling_actions'].count(-1),
+                "no_change": metrics['scaling_actions'].count(0),
+                "scale_up": metrics['scaling_actions'].count(1)
+            }
+        })
+        
+        return np.mean(metrics['rewards'])
 
     def save(self) -> None:
         """Save the model."""
@@ -110,8 +209,40 @@ class PPOAgent:
         self.model = PPO.load(path, env=self.env)
         logger.info("Model loaded from %s", path)
 
+      
+      
+        
+def parse_args():
+   
+    parser = argparse.ArgumentParser(description='MicroK8s Autoscaler PPO Agent')
+    parser.add_argument('--simulate', action='store_true',
+        help='Use simulated environment')
+    parser.add_argument('--eval-episodes', type=int, default=100,
+        help='Number of evaluation episodes')
+    parser.add_argument('--timesteps', type=int, default=50000,
+        help='Total training timesteps') 
+
+    return parser.parse_args()
+
+
+
 if __name__ == "__main__":
-    env = MicroK8sEnv()
+    args = parse_args()
+    DEFAULT_EPISODE = 100 if args.simulate else 10
+    args.eval_episodes = DEFAULT_EPISODE
+    
+    # Create the appropriate environment
+    if args.simulate:
+        env = MicroK8sEnvSimulated()
+        print("Using SIMULATED environment")
+    else:
+        env = MicroK8sEnv()  # Your real environment
+        print("Using REAL environment")
+    # Initialize and train agent
     agent = PPOAgent(env)
-    agent.train(total_timesteps=50000)
-    agent.evaluate(episodes=10)
+    agent.train(
+        total_timesteps=args.timesteps,
+        eval_episodes=args.eval_episodes
+    )
+    # Final evaluation
+    agent.evaluate(episodes=args.eval_episodes)

@@ -2,7 +2,7 @@
 import os
 import time
 import logging
-from typing import Dict, Optional
+from typing import Dict
 from functools import lru_cache
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -164,12 +164,14 @@ class KubernetesAPI:
 
         while time.time() - start_time < timeout:
             try:
-                deployment = self.apps_api.read_namespaced_deployment(deployment_name, self.namespace)
+                deployment = self.apps_api.read_namespaced_deployment(deployment_name, 
+                    self.namespace)
                 ready = deployment.status.ready_replicas or 0
                 updated = deployment.status.updated_replicas or 0
 
                 if ready == desired and updated == desired:
-                    logger.info("Scaling verified: %s has %d ready replicas", deployment_name, desired)
+                    logger.info("Scaling verified: %s has %d ready replicas",
+                        deployment_name, desired)
                     return True
 
                 time.sleep(5)

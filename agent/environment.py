@@ -4,8 +4,8 @@ import time
 import logging
 import numpy as np
 from typing import Tuple, Dict
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 from kubernetes.client.rest import ApiException
 from agent.kubernetes_api import KubernetesAPI, KubernetesAPIError
 
@@ -45,7 +45,19 @@ class MicroK8sEnv(gym.Env):
         self.state = None
         logger.info("Initialized MicroK8sEnv for %s in namespace %s", deployment_name, namespace)
 
-    def reset(self) -> np.ndarray:
+    # def reset(self) -> np.ndarray:
+    #     """Reset environment to initial state."""
+    #     try:
+    #         # Set initial pod count to 2
+    #         self.k8s.safe_scale(self.deployment_name, 2)
+    #         time.sleep(self.scaling_delay)
+    #         self.state = self._get_normalized_state()
+    #         logger.info("Environment reset: state=%s", self.state)
+    #         return self.state
+    #     except KubernetesAPIError as e:
+    #         logger.error("Reset failed: %s", e)
+    #         raise
+    def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
         """Reset environment to initial state."""
         try:
             # Set initial pod count to 2
@@ -53,13 +65,13 @@ class MicroK8sEnv(gym.Env):
             time.sleep(self.scaling_delay)
             self.state = self._get_normalized_state()
             logger.info("Environment reset: state=%s", self.state)
-            return self.state
+            return self.state, {}  # Gymnasium expects (obs, info)
         except KubernetesAPIError as e:
             logger.error("Reset failed: %s", e)
             raise
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
-        """Execute action and return new state, reward, done, and info."""
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        """Execute action and return (obs, reward, terminated, truncated, info)."""
         try:
             prev_state = self.state
             current_replicas = self.k8s._get_current_replicas(self.deployment_name)
@@ -69,22 +81,20 @@ class MicroK8sEnv(gym.Env):
                 self.k8s.safe_scale(self.deployment_name, current_replicas + 1)
             elif action == 1:  # Scale down
                 self.k8s.safe_scale(self.deployment_name, current_replicas - 1)
-            # Action 2: No-op (do nothing)
 
-            time.sleep(self.scaling_delay)  # Wait for scaling effect
+            time.sleep(self.scaling_delay)
             self.state = self._get_normalized_state()
 
             reward = self._calculate_reward(prev_state, self.state)
-            done = self._is_done()
+            terminated = self._is_done()  # True if episode ends
+            truncated = False  # SB3 rarely uses this
             info = {"action": action, "replicas": current_replicas}
 
             logger.debug("Step: action=%d, reward=%.2f, state=%s", action, reward, self.state)
-            return self.state, reward, done, info
-
+            return self.state, reward, terminated, truncated, info
         except KubernetesAPIError as e:
             logger.error("Step failed: %s", e)
-            reward = -10.0  # Penalty for failure
-            return self.state, reward, False, {"error": str(e)}
+            return self.state, -10.0, False, False, {"error": str(e)}
 
     def _get_normalized_state(self) -> np.ndarray:
         """Get and normalize cluster state."""
