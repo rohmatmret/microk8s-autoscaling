@@ -1,11 +1,18 @@
+import argparse
 import os
 import logging
+from datetime import datetime
+from typing import Dict, Any, Optional
 import numpy as np
 from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import CheckpointCallback
-import wandb
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList, BaseCallback
+from stable_baselines3.common.env_util import make_vec_env
 from wandb.integration.sb3 import WandbCallback
+
+from agent.environment_simulated import MicroK8sEnvSimulated
 from agent.environment import MicroK8sEnv
+
+import wandb
 
 # Configure logging
 logging.basicConfig(
@@ -16,103 +23,324 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class DQNAgent:
-    """DQN agent for MicroK8s autoscaling."""
+    """DQN agent with comprehensive autoscaling metrics tracking."""
 
-    def __init__(
-        self,
-        env: MicroK8sEnv,
-        learning_rate: float = 0.001,
-        buffer_size: int = 10000,
-        batch_size: int = 32,
-        gamma: float = 0.95,
-        model_dir: str = "./models/dqn"
-    ):
-        self.env = env
-        self.model_dir = model_dir
-        os.makedirs(model_dir, exist_ok=True)
-
-        # Initialize wandb
-        wandb.init(
-            project="microk8s_rl_autoscaling",
-            config={
-                "learning_rate": learning_rate,
-                "buffer_size": buffer_size,
-                "batch_size": batch_size,
-                "gamma": gamma
-            }
-        )
-
-        # Initialize DQN model
-        self.model = DQN(
-            policy="MlpPolicy",
-            env=env,
-            learning_rate=learning_rate,
-            buffer_size=buffer_size,
-            batch_size=batch_size,
-            gamma=gamma,
-            learning_starts=1000,
-            train_freq=4,
-            target_update_interval=1000,
-            exploration_fraction=0.1,
-            exploration_final_eps=0.01,
-            verbose=1
-        )
-        logger.info("Initialized DQN with learning_rate=%.4f, gamma=%.2f", learning_rate, gamma)
-
-    def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000) -> None:
-        """Train the DQN model."""
+    def __init__(self, env, environment: MicroK8sEnv, is_simulated: bool = False, **kwargs):
+        """
+        Initialize DQN agent with metrics tracking.
+        
+        Args:
+            env: RL environment
+            is_simulated: Whether using simulated environment
+            kwargs: Additional configs
+                - model_dir: Directory to save models
+                - learning_rate: DQN learning rate
+                - buffer_size: Replay buffer size
+                - batch_size: Training batch size
+                - gamma: Discount factor
+        """
         try:
-            checkpoint_callback = CheckpointCallback(
-                save_freq=checkpoint_freq,
-                save_path=self.model_dir,
-                name_prefix="dqn_model"
-            )
-            wandb_callback = WandbCallback(
-                model_save_path=f"{self.model_dir}/wandb",
-                verbose=2
-            )
-            self.model.learn(
-                total_timesteps=total_timesteps,
-                callback=[checkpoint_callback, wandb_callback],
-                log_interval=10
-            )
-            self.save()
-            logger.info("Training completed for %d timesteps", total_timesteps)
+            self.env = env
+            
+            self.is_simulated = is_simulated
+            self.eval_env = make_vec_env(lambda: environment, n_envs=1)
+
+            self.model_dir = kwargs.get('model_dir', './models/dqn')
+            os.makedirs(self.model_dir, exist_ok=True)
+
+            # Generate unique run ID
+            self.run_id = self._generate_run_id(kwargs)
+            
+            # Initialize WandB with autoscaling-specific config
+            self._init_wandb(kwargs)
+            
+            # Initialize DQN with tuned parameters
+            self._init_model(kwargs)
+            
+            logger.info("DQN agent initialized (ID: %s)", self.run_id)
+            
         except Exception as e:
-            logger.error("Training failed: %s", e)
+            logger.error("Initialization failed: %s", str(e))
             raise
 
-    def evaluate(self, episodes: int = 10) -> float:
-        """Evaluate the model and return average reward."""
-        total_rewards = []
-        for episode in range(episodes):
-            obs = self.env.reset()
-            done = False
-            episode_reward = 0
-            while not done:
-                action, _ = self.model.predict(obs, deterministic=True)
-                obs, reward, done, info = self.env.step(action)
-                episode_reward += reward
-            total_rewards.append(episode_reward)
-            logger.info("Episode %d reward: %.2f", episode + 1, episode_reward)
-        avg_reward = np.mean(total_rewards)
-        wandb.log({"eval_avg_reward": avg_reward})
-        logger.info("Average reward over %d episodes: %.2f", episodes, avg_reward)
-        return avg_reward
+    def _generate_run_id(self, config: Dict[str, Any]) -> str:
+        """Generate unique run ID with config parameters."""
+        timestamp = datetime.now().strftime("%m%d_%H%M")  # Shorter timestamp
+        return (
+            f"dqn_{'sim' if self.is_simulated else 'real'}_"
+            f"lr{config.get('learning_rate', 0.0005):.0e}_"
+            f"t{timestamp}"
+        )
 
-    def save(self) -> None:
-        """Save the model."""
-        self.model.save(f"{self.model_dir}/dqn_final")
-        logger.info("Model saved to %s", self.model_dir)
+    def _init_wandb(self, config: Dict[str, Any]):
+        """Initialize WandB with autoscaling-specific settings."""
+        try:
+            wandb.init(
+                project="microk8s_rl_autoscaling",
+                name=self.run_id,
+                config={
+                    "algorithm": "DQN",
+                    "environment": "simulated" if self.is_simulated else "real",
+                    "learning_rate": config.get('learning_rate', 0.0005),
+                    "buffer_size": config.get('buffer_size', 100000),
+                    "batch_size": config.get('batch_size', 64),
+                    "gamma": config.get('gamma', 0.99),
+                    "exploration_fraction": config.get('exploration_fraction', 0.2),
+                    "exploration_final_eps": config.get('exploration_final_eps', 0.01),
+                },
+                tags=["autoscaling", "DQN", "simulated" if self.is_simulated else "real"],
+                sync_tensorboard=True
+            )
+            
+            # Define custom metric grouping
+            wandb.define_metric("dqn/*", step_metric="train/global_step")
+            wandb.define_metric("cluster/*", step_metric="train/global_step")
+            wandb.define_metric("actions/*", step_metric="train/global_step")
+            
+        except Exception as e:
+            logger.error("WandB initialization failed: %s", str(e))
+            raise
 
-    def load(self, path: str = None) -> None:
-        """Load a trained model."""
-        path = path or f"{self.model_dir}/dqn_final"
-        self.model = DQN.load(path, env=self.env)
-        logger.info("Model loaded from %s", path)
+    def _init_model(self, config: Dict[str, Any]):
+        """Initialize DQN model with exploration tracking."""
+        try:
+            self.model = DQN(
+                policy="MlpPolicy",
+                env=self.env,
+                learning_rate=config.get('learning_rate', 0.0005),
+                buffer_size=config.get('buffer_size', 100000),
+                batch_size=config.get('batch_size', 64),
+                gamma=config.get('gamma', 0.99),
+                learning_starts=config.get('learning_starts', 10000),
+                target_update_interval=config.get('target_update_interval', 10000),
+                exploration_fraction=config.get('exploration_fraction', 0.2),
+                exploration_final_eps=config.get('exploration_final_eps', 0.01),
+                tensorboard_log=f"{self.model_dir}/tensorboard",
+                verbose=1
+            )
+        except Exception as e:
+            logger.error("Model initialization failed: %s", str(e))
+            raise
+
+    def train(self, total_timesteps: int = 100000, eval_episodes: int = 20):
+        """Train with comprehensive metrics tracking."""
+        try:
+            logger.info("Starting training for %d timesteps", total_timesteps)
+            
+            callbacks = self._setup_callbacks(eval_episodes)
+            tb_log_name = f"dqn_{datetime.now().strftime('%m%d_%H%M')}"
+
+            self.model.learn(
+                total_timesteps=total_timesteps,
+                callback=callbacks,
+                log_interval=100,
+                tb_log_name=tb_log_name
+            )
+            
+            self.save()
+            logger.info("Training completed")
+            
+        except KeyboardInterrupt:
+            logger.warning("Training interrupted by user")
+            self.save()
+            raise
+        except Exception as e:
+            logger.error("Training failed: %s", str(e))
+            raise
+
+    def _setup_callbacks(self, eval_episodes: int) -> CallbackList:
+        """Configure callbacks with metrics tracking."""
+        class AutoscalingMetricsCallback(BaseCallback):
+            def __init__(self, verbose=0):
+                super().__init__(verbose)
+                self.action_history = []
+                self.episode_count = 0
+
+            def _on_step(self) -> bool:
+                # Log DQN internal metrics every 10 steps
+                if self.n_calls % 10 == 0:
+                    self._log_dqn_metrics()
+                
+                # Track actions for scaling analysis
+                if len(self.locals['actions']) > 0:
+                    self.action_history.extend(self.locals['actions'])
+                
+                return True
+
+            def _on_rollout_end(self) -> None:
+                # Log cluster metrics at the end of each rollout
+                if len(self.locals['infos']) > 0:
+                    self._log_cluster_metrics(self.locals['infos'][0])
+                
+                # Log scaling actions statistics
+                if len(self.action_history) > 0:
+                    self._log_scaling_actions()
+                    self.action_history = []
+                
+                self.episode_count += 1
+
+            def _log_dqn_metrics(self):
+                """Log DQN-specific exploration and Q-value metrics."""
+                wandb.log({
+                    "dqn/epsilon": self.model.exploration_rate,
+                    "dqn/exploration_steps": self.model.num_timesteps,
+                    "dqn/q_value_mean": np.mean(self.model.replay_buffer.rewards[-1000:]) if hasattr(self.model, 'replay_buffer') else 0,
+                }, commit=False)
+
+            def _log_cluster_metrics(self, info: Dict[str, Any]):
+                """Log cluster resource utilization metrics."""
+                if 'cluster_metrics' in info:
+                    wandb.log({
+                        "cluster/cpu_util": info['cluster_metrics']['cpu'],
+                        "cluster/memory_util": info['cluster_metrics']['memory'],
+                        "cluster/pod_count": info['cluster_metrics']['pods'],
+                        "cluster/latency": info['cluster_metrics']['latency']
+                    }, commit=False)
+
+            def _log_scaling_actions(self):
+                """Analyze and log scaling action patterns."""
+                actions = np.array(self.action_history)
+                wandb.log({
+                    "actions/scale_up": np.sum(actions == 2),
+                    "actions/no_change": np.sum(actions == 1),
+                    "actions/scale_down": np.sum(actions == 0),
+                    "actions/mean_action": np.mean(actions)
+                }, commit=False)
+
+        return CallbackList([
+            CheckpointCallback(
+                save_freq=10000,
+                save_path=self.model_dir,
+                name_prefix="dqn_model"
+            ),
+            EvalCallback(
+                eval_env=self.eval_env,
+                best_model_save_path=f"{self.model_dir}/best_model",
+                log_path=f"{self.model_dir}/eval_logs",
+                eval_freq=10000,
+                n_eval_episodes=eval_episodes,
+                deterministic=True
+            ),
+            WandbCallback(
+                model_save_path=f"{self.model_dir}/wandb",
+                verbose=2,
+                log="all"
+            ),
+            AutoscalingMetricsCallback()
+        ])
+
+    def evaluate(self, episodes: int = 20) -> float:
+        """Evaluate with detailed metrics tracking."""
+        try:
+            logger.info("Starting evaluation with %d episodes", episodes)
+            rewards = []
+            action_history = []
+            cluster_metrics = {
+                'cpu': [], 'memory': [], 'pods': [], 'latency': []
+            }
+
+            for episode in range(episodes):
+                # Handle environment reset
+                reset_result = self.env.reset()
+                if isinstance(reset_result, tuple):
+                    obs = reset_result[0]  # Gym API returns (obs, info)
+                else:
+                    obs = reset_result     # VecEnv API returns obs only
+                    
+                done = False
+                episode_reward = 0
+                
+                while not done:
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    step_result = self.env.step(action)
+                    
+                    # Handle both Gym API and VecEnv API step returns
+                    if len(step_result) == 4:
+                        # Gym API: obs, reward, done, info
+                        obs, reward, done, info = step_result
+                    else:
+                        # VecEnv API: (obs, reward, done, info), ...
+                        obs, reward, done, info = step_result[0]
+                    
+                    episode_reward += reward
+                    action_history.append(action)
+                
+                    current_info = info[0] if isinstance(info, list) else info
+                    if isinstance(current_info, dict) and 'cluster_metrics' in current_info:
+                        for k in cluster_metrics.keys():
+                            cluster_metrics[k].append(current_info['cluster_metrics'][k])
+                
+                rewards.append(episode_reward)
+                wandb.log({"eval/episode_reward": episode_reward})
+
+            # Log aggregated metrics
+            avg_reward = np.mean(rewards)
+            wandb.log({
+                "eval/mean_reward": avg_reward,
+                "eval/std_reward": np.std(rewards),
+                "eval/cpu_mean": np.mean(cluster_metrics['cpu']),
+                "eval/pod_mean": np.mean(cluster_metrics['pods']),
+                "eval/scale_ups": np.sum(np.array(action_history) == 2),
+                "eval/scale_downs": np.sum(np.array(action_history) == 0)
+            })
+
+            logger.info("Evaluation completed. Avg reward: %.2f", avg_reward)
+            return avg_reward
+            
+        except Exception as e:
+            logger.error("Evaluation failed: %s", str(e))
+            raise
+        
+    def save(self, path: Optional[str] = None) -> None:
+        """Save model with error handling."""
+        try:
+            path = path or f"{self.model_dir}/dqn_final"
+            self.model.save(path)
+            logger.info("Model saved to %s", path)
+        except Exception as e:
+            logger.error("Model save failed: %s", str(e))
+            raise
+
+    def load(self, path: Optional[str] = None) -> None:
+        """Load model with error handling."""
+        try:
+            path = path or f"{self.model_dir}/dqn_final"
+            self.model = DQN.load(path, env=self.env)
+            logger.info("Model loaded from %s", path)
+        except Exception as e:
+            logger.error("Model load failed: %s", str(e))
+            raise
+
+def main():
+    """Main execution with argument parsing."""
+    try:
+        parser = argparse.ArgumentParser(description='MicroK8s DQN Autoscaler')
+        parser.add_argument('--simulate', action='store_true', help='Use simulated environment')
+        parser.add_argument('--timesteps', type=int, default=100000, help='Training timesteps')
+        parser.add_argument('--eval-episodes', type=int, default=20, help='Evaluation episodes')
+        args = parser.parse_args()
+
+        # Instantiate environments separately for training and evaluation
+        if args.simulate:
+            env = MicroK8sEnvSimulated()
+        else:
+            env = MicroK8sEnv()
+
+        # Initialize agent with both environments
+        agent = DQNAgent(env=env, environment=env, is_simulated=args.simulate)
+
+        # Train and evaluate
+        agent.train(
+            total_timesteps=args.timesteps,
+            eval_episodes=args.eval_episodes
+        )
+
+        agent.evaluate(episodes=args.eval_episodes)
+
+    except Exception as e:
+        logger.critical("Fatal error: %s", str(e))
+        raise
+
 
 if __name__ == "__main__":
-    env = MicroK8sEnv()
-    agent = DQNAgent(env)
-    agent.train(total_timesteps=50000)
-    agent.evaluate(episodes=10)
+    main()
