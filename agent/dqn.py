@@ -22,6 +22,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+ENV_NAME = "microk8s_env"
+EXP_NAME = "dqn_autoscaling_rewardshape"
+LR = 3e-4
+RUNID = f"dqn_{ENV_NAME[:5]}_lr{LR:.0e}_{datetime.now().strftime('%m%d%H%M')}"
+
 class DQNAgent:
     """DQN agent with comprehensive autoscaling metrics tracking."""
 
@@ -40,10 +45,10 @@ class DQNAgent:
                 - gamma: Discount factor
         """
         try:
-            self.env = env
-            
+            self.env = make_vec_env(lambda:environment, n_envs=1)
             self.is_simulated = is_simulated
             self.eval_env = make_vec_env(lambda: environment, n_envs=1)
+            self.model = None  # Initialize model attribute
 
             self.model_dir = kwargs.get('model_dir', './models/dqn')
             os.makedirs(self.model_dir, exist_ok=True)
@@ -77,7 +82,8 @@ class DQNAgent:
         try:
             wandb.init(
                 project="microk8s_rl_autoscaling",
-                name=self.run_id,
+                name=RUNID,
+                id=RUNID,
                 config={
                     "algorithm": "DQN",
                     "environment": "simulated" if self.is_simulated else "real",
@@ -89,7 +95,8 @@ class DQNAgent:
                     "exploration_final_eps": config.get('exploration_final_eps', 0.01),
                 },
                 tags=["autoscaling", "DQN", "simulated" if self.is_simulated else "real"],
-                sync_tensorboard=True
+                sync_tensorboard=False,
+                tensorboard=False
             )
             
             # Define custom metric grouping
@@ -246,51 +253,82 @@ class DQNAgent:
                     obs = reset_result[0]  # Gym API returns (obs, info)
                 else:
                     obs = reset_result     # VecEnv API returns obs only
-                    
                 done = False
                 episode_reward = 0
-                
                 while not done:
                     action, _ = self.model.predict(obs, deterministic=True)
                     step_result = self.env.step(action)
                     
                     # Handle both Gym API and VecEnv API step returns
-                    if len(step_result) == 4:
+                    if isinstance(step_result, tuple) and len(step_result) == 1:
+                        # VecEnv API: ((obs, reward, terminated, truncated, info」の), ...)
+                        step_result = step_result[0]
+                    
+                    # Handle Gymnasium (5 values) or Gym (4 values) return
+                    if len(step_result) == 5:
+                        # Gymnasium API: obs, reward, terminated, truncated, info
+                        obs, reward, terminated, truncated, info = step_result
+                        done = terminated or truncated
+                    elif len(step_result) == 4:
                         # Gym API: obs, reward, done, info
                         obs, reward, done, info = step_result
                     else:
-                        # VecEnv API: (obs, reward, done, info), ...
-                        obs, reward, done, info = step_result[0]
-                    
+                        raise ValueError(f"Unexpected step result format: {step_result}")
+
                     episode_reward += reward
-                    action_history.append(action)
-                
-                    current_info = info[0] if isinstance(info, list) else info
-                    if isinstance(current_info, dict) and 'cluster_metrics' in current_info:
-                        for k in cluster_metrics.keys():
-                            cluster_metrics[k].append(current_info['cluster_metrics'][k])
-                
+                    action_history.append(action)  # Ensure action is appended
+
+                    # Extract info and log for debugging
+                    current_info = info[0] if isinstance(info, list) and len(info) > 0 else info
+                    if not isinstance(current_info, dict):
+                        logger.warning("Invalid info format: %s ",current_info)
+                        current_info = {}
+                    logger.debug("Current info: %s ",current_info)
+
+                    # Map custom_metrics to cluster_metrics
+                    if 'custom_metrics' in current_info:
+                        custom_metrics = current_info['custom_metrics']
+                        cluster_metrics['cpu'].append(custom_metrics.get('cpu_utilization', 0))
+                        cluster_metrics['memory'].append(custom_metrics.get('memory_utilization', 0))
+                        cluster_metrics['pods'].append(custom_metrics.get('pod_count', 0))
+                        cluster_metrics['latency'].append(custom_metrics.get('latency', 0))
+                        cluster_metrics['swap'].append(custom_metrics.get('swap_usage', 0))
+                    elif 'cluster_metrics' in current_info:
+                        cluster_metrics['cpu'].append(current_info['cluster_metrics'].get('cpu', 0))
+                        cluster_metrics['memory'].append(current_info['cluster_metrics'].get('memory', 0))
+                        cluster_metrics['pods'].append(current_info['cluster_metrics'].get('pods', 0))
+                        cluster_metrics['latency'].append(current_info['cluster_metrics'].get('latency', 0))
+                        cluster_metrics['swap'].append(custom_metrics.get('swap_usage', 0))
+                    else:
+                        logger.warning("No custom_metrics in info: %s" ,current_info)
+
+                # Log episode reward after episode completes
                 rewards.append(episode_reward)
                 wandb.log({"eval/episode_reward": episode_reward})
 
-            # Log aggregated metrics
+            # Log aggregated metrics with safeguards for empty lists
             avg_reward = np.mean(rewards)
             wandb.log({
-                "eval/mean_reward": avg_reward,
+               "eval/mean_reward": avg_reward,
                 "eval/std_reward": np.std(rewards),
-                "eval/cpu_mean": np.mean(cluster_metrics['cpu']),
-                "eval/pod_mean": np.mean(cluster_metrics['pods']),
+                "eval/cpu_mean": np.mean(cluster_metrics['cpu']) if cluster_metrics['cpu'] else 0,
+                "eval/memory_mean": np.mean(cluster_metrics['memory']) if cluster_metrics['memory'] else 0,
+                "eval/swap_mean": np.mean(cluster_metrics['swap']) if cluster_metrics['swap'] else 0,
+                "eval/pod_mean": np.mean(cluster_metrics['pods']) if cluster_metrics['pods'] else 0,
                 "eval/scale_ups": np.sum(np.array(action_history) == 2),
                 "eval/scale_downs": np.sum(np.array(action_history) == 0)
             })
 
+            # Debug action history
+            logger.info("Scale ups: %d, Scale downs: %d", np.sum(np.array(action_history) == 2), np.sum(np.array(action_history) == 0))
+
             logger.info("Evaluation completed. Avg reward: %.2f", avg_reward)
             return avg_reward
-            
+
         except Exception as e:
             logger.error("Evaluation failed: %s", str(e))
             raise
-        
+             
     def save(self, path: Optional[str] = None) -> None:
         """Save model with error handling."""
         try:

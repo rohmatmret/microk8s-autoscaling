@@ -72,7 +72,7 @@ class PPOAgent:
                 "batch_size": batch_size,
                 "n_epochs": 10,
                 "normalize_advantage": True,
-                "ent_coef": 0.0,
+                "ent_coef": 0.05,
                 "clip_range": 0.2,
                 "vf_coef": 0.5,
                 "policy": "MlpPolicy",
@@ -82,11 +82,15 @@ class PPOAgent:
         )
         wandb.define_metric("custom/*", step_metric="train/global_step")
         wandb.define_metric("train/global_step")
+        wandb.define_metric("custom/cpu_utilization", step_metric="train/global_step")
+        wandb.define_metric("custom/memory_utilization", step_metric="train/global_step")
+        wandb.define_metric("custom/pod_count", step_metric="train/global_step")
+
         wandb.config.update({
             "custom_metrics": {
                 "target_cpu_range": [0.4, 0.8],
                 "target_memory_range": [0.3, 0.7],
-                "ideal_pod_count": 5
+                "ideal_pod_count": 5,
             }
         })
         wandb.Settings(init_timeout=180)
@@ -111,7 +115,9 @@ class PPOAgent:
         )
         logger.info("Initialized PPO with learning_rate=%.4f, gamma=%.2f", learning_rate, gamma)
 
-    def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000, eval_episodes=10) -> None:
+    def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000, 
+        eval_episodes=10) -> None:
+        
         """Train the PPO model."""
         try:
             checkpoint_callback = CheckpointCallback(
@@ -158,14 +164,13 @@ class PPOAgent:
             'cpu_util': [],
             'memory_util': [],
             'pod_counts': [],
+            'swap_usage': [],
             'scaling_actions': []
         }
-        
         for episode in range(episodes):
             obs, _ = self.env.reset()
             done = False
-            episode_reward = 0
-            
+            episode_reward =0
             while not done:
                 action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, terminated, truncated, info = self.env.step(action)
@@ -174,20 +179,31 @@ class PPOAgent:
                 
                 # Collect metrics
                 if 'custom_metrics' in info:
-                    metrics['cpu_util'].append(info['custom_metrics']['cpu_utilization'])
-                    metrics['memory_util'].append(info['custom_metrics']['memory_utilization'])
-                    metrics['pod_counts'].append(info['custom_metrics']['pod_count'])
-                    metrics['scaling_actions'].append(info['custom_metrics']['scaling_action'])
+                    custom = info['custom_metrics']
+                    metrics['cpu_util'].append(custom.get('cpu_utilization', 0.0))
+                    metrics['memory_util'].append(custom.get('memory_utilization', 0.0))
+                    metrics['pod_counts'].append(custom.get('pod_count', 0))
+                    metrics['swap_usage'].append(custom.get('swap_usage', 0.0))
+                    metrics['scaling_actions'].append(custom.get('scaling_action', 0))
+                    metrics['rewards'].append(episode_reward)
+                elif 'cluster_metrics' in info:
+                    custom = info['cluster_metrics']
+                    metrics['cpu_util'].append(custom.get('cpu_utilization', 0.0))
+                    metrics['memory_util'].append(custom.get('memory_utilization', 0.0))
+                    metrics['pod_counts'].append(custom.get('pod_count', 0))
+                    metrics['swap_usage'].append(custom.get('swap_usage', 0.0))
+                    metrics['scaling_actions'].append(custom.get('scaling_action', 0))
+                    metrics['rewards'].append(episode_reward)
+                
+                logger.info("Episode %d reward: %.2f", episode + 1, episode_reward)
             
-            metrics['rewards'].append(episode_reward)
-            logger.info("Episode %d reward: %.2f", episode + 1, episode_reward)
-        
         # Log aggregated metrics
         wandb.log({
             "eval/mean_reward": np.mean(metrics['rewards']),
             "eval/std_reward": np.std(metrics['rewards']),
             "eval/mean_cpu": np.mean(metrics['cpu_util']),
             "eval/mean_memory": np.mean(metrics['memory_util']),
+            "eval/mean_swap": np.mean(metrics['swap_usage']),
             "eval/mean_pods": np.mean(metrics['pod_counts']),
             "eval/action_distribution": {
                 "scale_down": metrics['scaling_actions'].count(-1),

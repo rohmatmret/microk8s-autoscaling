@@ -109,19 +109,34 @@ class MicroK8sEnv(gym.Env):
 
     def _calculate_reward(self, prev_state: np.ndarray, new_state: np.ndarray) -> float:
         """Calculate reward based on state transition."""
-        cpu, memory, latency, pods = new_state
-        reward = -latency * 0.6 - cpu * 0.3 - memory * 0.1  # Weighted metrics
+        cpu, memory, latency, swap, pods = new_state
+        reward = (
+            -latency * 0.5     # User experience utama
+            -cpu * 0.2         # Beban sistem
+            -memory * 0.15
+            -swap * 0.1        # Swap = tekanan RAM
+            -pods * 0.05       # Biaya infrastruktur
+        )
 
-        # Penalties
-        if latency > 0.8:  # High latency (>160ms normalized)
-            reward -= 5.0
-        if cpu > 0.85:  # High CPU usage
+        # --- Penalti tambahan untuk outlier atau kondisi tidak optimal ---
+        if latency > 0.8:
             reward -= 2.0
-        if pods > 0.8:  # Too many pods
+        if cpu > 0.9:
+            reward -= 1.5
+        if swap > 0.5:
+            reward -= 1.0
+        if pods > 0.85:
             reward -= 1.0
 
-        logger.debug("Reward calculated: %.2f (latency=%.2f, cpu=%.2f, pods=%.2f)", 
-                     reward, latency, cpu, pods)
+
+        # --- Penalti untuk scaling yang tidak efektif ---
+        if prev_state[4] < new_state[4]:  # jumlah pods naik
+            if abs(prev_state[2] - new_state[2]) < 0.05:  # latency tidak turun signifikan
+                reward -= 1.0
+                
+        if latency < 0.3 and cpu < 0.5:
+            reward += 1.0
+                
         return reward
 
     def _is_done(self) -> bool:
