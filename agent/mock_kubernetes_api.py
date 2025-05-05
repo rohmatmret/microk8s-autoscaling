@@ -51,11 +51,11 @@ class MockKubernetesAPI:
 
         # Simulate 5% chance of scaling failure
         if self.random.random() < 0.05:
-            print(f"[MockAPI] Scaling FAILED to {bounded_replicas} replicas.")
+            # print(f"[MockAPI] Scaling FAILED to {bounded_replicas} replicas.")
             return False
 
         # Simulate delay in applying scaling
         self.scale_buffer.append(bounded_replicas)
 
-        print(f"[MockAPI] Scaling scheduled to {bounded_replicas} replicas (buffer size: {len(self.scale_buffer)}).")
+        # print(f"[MockAPI] Scaling scheduled to {bounded_replicas} replicas (buffer size: {len(self.scale_buffer)}).")
         return True

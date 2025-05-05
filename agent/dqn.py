@@ -89,10 +89,10 @@ class DQNAgent:
                     "environment": "simulated" if self.is_simulated else "real",
                     "learning_rate": config.get('learning_rate', 0.0005),
                     "buffer_size": config.get('buffer_size', 100000),
-                    "batch_size": config.get('batch_size', 64),
+                    "batch_size": config.get('batch_size', 100),
                     "gamma": config.get('gamma', 0.99),
                     "exploration_fraction": config.get('exploration_fraction', 0.2),
-                    "exploration_final_eps": config.get('exploration_final_eps', 0.01),
+                    "exploration_final_eps": config.get('exploration_final_eps', 0.005),
                 },
                 tags=["autoscaling", "DQN", "simulated" if self.is_simulated else "real"],
                 sync_tensorboard=False,
@@ -116,20 +116,23 @@ class DQNAgent:
                 env=self.env,
                 learning_rate=config.get('learning_rate', 0.0005),
                 buffer_size=config.get('buffer_size', 100000),
-                batch_size=config.get('batch_size', 64),
+                batch_size=config.get('batch_size', 100),
                 gamma=config.get('gamma', 0.99),
+                tau=0.01,
+                train_freq=4,
                 learning_starts=config.get('learning_starts', 10000),
                 target_update_interval=config.get('target_update_interval', 10000),
                 exploration_fraction=config.get('exploration_fraction', 0.2),
-                exploration_final_eps=config.get('exploration_final_eps', 0.01),
+                exploration_final_eps=config.get('exploration_final_eps', 0.005),
                 tensorboard_log=f"{self.model_dir}/tensorboard",
-                verbose=1
+                verbose=1,
             )
+             
         except Exception as e:
             logger.error("Model initialization failed: %s", str(e))
             raise
 
-    def train(self, total_timesteps: int = 100000, eval_episodes: int = 20):
+    def train(self, total_timesteps: int = 100000, eval_episodes: int = 100):
         """Train with comprehensive metrics tracking."""
         try:
             logger.info("Starting training for %d timesteps", total_timesteps)
@@ -236,14 +239,14 @@ class DQNAgent:
             AutoscalingMetricsCallback()
         ])
 
-    def evaluate(self, episodes: int = 20) -> float:
+    def evaluate(self, episodes: int = 100) -> float:
         """Evaluate with detailed metrics tracking."""
         try:
             logger.info("Starting evaluation with %d episodes", episodes)
             rewards = []
             action_history = []
             cluster_metrics = {
-                'cpu': [], 'memory': [], 'pods': [], 'latency': []
+                'cpu': [], 'memory': [], 'pods': [], 'latency': [],'swap':[]
             }
 
             for episode in range(episodes):
@@ -355,7 +358,7 @@ def main():
         parser = argparse.ArgumentParser(description='MicroK8s DQN Autoscaler')
         parser.add_argument('--simulate', action='store_true', help='Use simulated environment')
         parser.add_argument('--timesteps', type=int, default=100000, help='Training timesteps')
-        parser.add_argument('--eval-episodes', type=int, default=20, help='Evaluation episodes')
+        parser.add_argument('--eval-episodes', type=int, default=100, help='Evaluation episodes')
         args = parser.parse_args()
 
         # Instantiate environments separately for training and evaluation
