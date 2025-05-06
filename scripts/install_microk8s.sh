@@ -1,7 +1,7 @@
 #!/bin/bash
-# scripts/install_microk8s.sh
-# Installs MicroK8s, Python, k6, and dependencies for RL autoscaling simulation.
-# Usage: sudo bash scripts/install_microk8s.sh
+# scripts/setup_microk8s_multipass.sh
+# Sets up Multipass, creates a VM, installs MicroK8s, and configures kubeconfig for autoscaling simulation.
+# Usage: bash scripts/setup_microk8s_multipass.sh
 
 set -e  # Exit on error
 
@@ -11,192 +11,162 @@ if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
     exit 1
 fi
 
+# Setup logging
 LOG_DIR="$(pwd)/logs"
-LOG_FILE="$LOG_DIR/install.log"
+LOG_FILE="$LOG_DIR/setup.log"
 mkdir -p "$LOG_DIR"
-
-# Redirect output to log and console
 exec 3>&1 1>>"$LOG_FILE" 2>&1
 log() { echo "$@" >&3; echo "$@" >> "$LOG_FILE"; }
 
-# Require sudo
-if [[ $EUID -ne 0 ]]; then
-    log "❌ Please run this script with sudo!"
+# Check if running on macOS
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+if [[ "$OS" != "darwin" ]]; then
+    log "❌ This script is designed for macOS only!"
     exit 1
 fi
+log "🔍 Detected OS: macOS"
 
-# Detect OS
-OS=$(uname -s | tr '[:upper:]' '[:lower:]' || echo "unknown")
-log "🔍 Detected OS: $OS"
-case "$OS" in
-    linux*)  PKG_MANAGER="snap" ;;
-    darwin*) PKG_MANAGER="brew" ;;
-    *)
-        log "❌ Unsupported OS: $OS"
-        exit 1
-        ;;
-esac
-log "🔍 Package manager: $PKG_MANAGER"
-
-# Install package manager dependencies
-if [[ "$PKG_MANAGER" == "brew" ]]; then
-    if ! command -v brew >/dev/null; then
-        log "📌 Installing Homebrew..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    fi
+# Install Homebrew if not installed
+if ! command -v brew >/dev/null; then
+    log "📌 Installing Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    log "✅ Homebrew installed!"
 fi
 
-# Install MicroK8s
-if ! command -v microk8s >/dev/null; then
-    log "📌 Installing MicroK8s..."
-    if [[ "$PKG_MANAGER" == "snap" ]]; then
-        snap install microk8s --classic || {
-            log "❌ Failed to install MicroK8s via snap!"
-            exit 1
-        }
-    elif [[ "$PKG_MANAGER" == "brew" ]]; then
-        brew install ubuntu/microk8s/microk8s || {
-            log "❌ Failed to install MicroK8s via brew!"
-            exit 1
-        }
-        microk8s install --cpu 4 --mem 8 --disk 30 || {
-            log "❌ Failed to initialize MicroK8s!"
-            exit 1
-        }
-    fi
-fi
-
-# Wait for MicroK8s to be ready with retries
-log "🔍 Waiting for MicroK8s to be ready..."
-for attempt in {1..3}; do
-    if microk8s status --wait-ready --timeout 300 >/dev/null; then
-        log "✅ MicroK8s status ready!"
-        break
-    fi
-    log "⚠️ MicroK8s not ready (attempt $attempt/3). Retrying in 10s..."
-    sleep 10
-    if [[ $attempt -eq 3 ]]; then
-        log "❌ MicroK8s failed to start! Inspecting..."
-        microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+# Install Multipass if not installed
+if ! command -v multipass >/dev/null; then
+    log "📌 Installing Multipass..."
+    brew install multipass
+    if [[ $? -ne 0 ]]; then
+        log "❌ Failed to install Multipass!"
         exit 1
     fi
-done
+    log "✅ Multipass installed, version: $(multipass version)"
+else
+    log "🔍 Multipass already installed, version: $(multipass version)"
+fi
 
-# Verify MicroK8s API server
-log "🔍 Verifying MicroK8s API server..."
-if ! microk8s kubectl get nodes >/dev/null 2>&1; then
-    log "⚠️ API server not responding. Restarting MicroK8s..."
-    microk8s stop
-    microk8s start
-    sleep 10
-    if ! microk8s status --wait-ready --timeout 300 >/dev/null; then
-        log "❌ MicroK8s API server failed! Check $LOG_DIR/microk8s_inspect.log"
-        microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+# Create VM with Multipass
+VM_NAME="microk8s-vm"
+log "🔍 Checking for VM $VM_NAME..."
+if multipass info "$VM_NAME" >/dev/null 2>&1; then
+    log "🔍 VM $VM_NAME already exists. Checking state..."
+    VM_STATE=$(multipass info "$VM_NAME" --format yaml | grep -E "^State:" | awk '{print $2}')
+    if [[ "$VM_STATE" == "Running" ]]; then
+        log "✅ VM $VM_NAME is already running."
+    elif [[ "$VM_STATE" == "Stopped" ]]; then
+        log "📌 Starting VM $VM_NAME..."
+        multipass start "$VM_NAME"
+        if [[ $? -ne 0 ]]; then
+            log "❌ Failed to start VM $VM_NAME!"
+            exit 1
+        fi
+        # Wait for VM to be ready
+        for attempt in {1..3}; do
+            if multipass info "$VM_NAME" --format yaml | grep -q "State: Running"; then
+                log "✅ VM $VM_NAME started successfully!"
+                break
+            fi
+            log "⚠️ Waiting for VM to start (attempt $attempt/3)..."
+            sleep 5
+            if [[ $attempt -eq 3 ]]; then
+                log "❌ VM $VM_NAME failed to start!"
+                exit 1
+            fi
+        done
+    else
+        log "❌ VM $VM_NAME is in unexpected state: $VM_STATE"
         exit 1
     fi
-fi
-
-# Enable MicroK8s add-ons
-log "🔧 Enabling MicroK8s add-ons..."
-for addon in dns storage ingress prometheus grafana metrics-server dashboard; do
-    microk8s enable "$addon" >> "$LOG_FILE" 2>&1 || {
-        log "⚠️ Warning: Failed to enable $addon (may already be enabled)"
-    }
-done
-log "✅ MicroK8s add-ons enabled!"
-
-# Install Python
-PYTHON="python3"
-if ! command -v "$PYTHON" >/dev/null; then
-    log "📌 Installing Python..."
-    if [[ "$PKG_MANAGER" == "snap" ]]; then
-        apt update && apt install -y python3 python3-pip python3-venv || {
-            log "❌ Failed to install Python!"
-            exit 1
-        }
-    elif [[ "$PKG_MANAGER" == "brew" ]]; then
-        brew install python || {
-            log "❌ Failed to install Python!"
-            exit 1
-        }
-    fi
-fi
-PYTHON_VERSION=$($PYTHON --version 2>&1)
-log "✅ Python installed: $PYTHON_VERSION"
-
-# Create virtual environment
-VENV_DIR="$(pwd)/venv"
-if [[ ! -d "$VENV_DIR" ]]; then
-    log "📌 Creating virtual environment..."
-    "$PYTHON" -m venv "$VENV_DIR" || {
-        log "❌ Failed to create virtual environment!"
+else
+    log "📌 Creating VM $VM_NAME..."
+    multipass launch --name "$VM_NAME" --cpus 2 --mem 4G --disk 40G
+    if [[ $? -ne 0 ]]; then
+        log "❌ Failed to create VM $VM_NAME!"
         exit 1
-    }
+    fi
+    # Wait for VM to be ready
+    for attempt in {1..3}; do
+        if multipass info "$VM_NAME" --format yaml | grep -q "State: Running"; then
+            log "✅ VM $VM_NAME created and running!"
+            break
+        fi
+        log "⚠️ Waiting for VM to start (attempt $attempt/3)..."
+        sleep 5
+        if [[ $attempt -eq 3 ]]; then
+            log "❌ VM $VM_NAME failed to start after creation!"
+            exit 1
+        fi
+    done
 fi
-source "$VENV_DIR/bin/activate"
-log "✅ Virtual environment activated!"
 
-# Install Python dependencies
-log "📦 Installing Python dependencies..."
-pip install --upgrade pip >> "$LOG_FILE" 2>&1
-pip install -r requirements.txt >> "$LOG_FILE" 2>&1 || {
-    log "❌ Failed to install dependencies! Check $LOG_FILE"
+# Install MicroK8s in the VM
+log "📌 Installing MicroK8s in VM $VM_NAME..."
+multipass exec "$VM_NAME" -- /bin/bash -c "
+    set -e
+    sudo snap install microk8s --classic --channel=1.32
+    sudo usermod -a -G microk8s ubuntu
+    sudo chown -f -R ubuntu ~/.kube
+    newgrp microk8s <<EOF
+        microk8s status --wait-ready --timeout 300
+    EOF
+    microk8s enable dns storage metrics-server
+"
+if [[ $? -ne 0 ]]; then
+    log "❌ Failed to install or configure MicroK8s in VM!"
     exit 1
-}
-log "✅ Dependencies installed!"
+fi
+log "✅ MicroK8s installed and configured in VM!"
 
-# Configure kubectl
+# Configure kubeconfig on host
 KUBE_CONFIG="$HOME/.kube/config"
 BACKUP_CONFIG="$HOME/.kube/config.backup.$(date +%s)"
-log "📌 Generating kubeconfig..."
 TEMP_CONFIG=$(mktemp)
-if ! microk8s config > "$TEMP_CONFIG" 2>>"$LOG_FILE"; then
-    log "❌ Failed to generate kubeconfig!"
+log "📌 Fetching kubeconfig from VM..."
+multipass exec "$VM_NAME" -- /snap/bin/microk8s config > "$TEMP_CONFIG"
+if [[ $? -ne 0 ]] || [[ ! -s "$TEMP_CONFIG" ]]; then
+    log "❌ Failed to fetch kubeconfig!"
     rm -f "$TEMP_CONFIG"
     exit 1
 fi
+
 # Validate kubeconfig
 if ! grep -q "apiVersion: v1" "$TEMP_CONFIG" || ! grep -q "kind: Config" "$TEMP_CONFIG"; then
-    log "❌ Generated kubeconfig is invalid! Check $LOG_FILE"
+    log "❌ Generated kubeconfig is invalid!"
     cat "$TEMP_CONFIG" >> "$LOG_FILE"
     rm -f "$TEMP_CONFIG"
     exit 1
 fi
+
+# Backup existing kubeconfig if it exists
 if [[ -f "$KUBE_CONFIG" ]]; then
-    log "📌 Backing up existing kubectl config to $BACKUP_CONFIG..."
+    log "📌 Backing up existing kubeconfig to $BACKUP_CONFIG..."
     cp "$KUBE_CONFIG" "$BACKUP_CONFIG"
 fi
-log "📌 Configuring kubectl..."
-mv "$TEMP_CONFIG" "$KUBE_CONFIG" || {
-    log "❌ Failed to write kubeconfig!"
+
+# Merge kubeconfig
+log "📌 Merging kubeconfig..."
+KUBECONFIG="$KUBE_CONFIG:$TEMP_CONFIG" kubectl config view --flatten > "$KUBE_CONFIG.new"
+if [[ $? -ne 0 ]]; then
+    log "❌ Failed to merge kubeconfig!"
+    rm -f "$TEMP_CONFIG" "$KUBE_CONFIG.new"
     exit 1
-}
+fi
+mv "$KUBE_CONFIG.new" "$KUBE_CONFIG"
 chmod 600 "$KUBE_CONFIG"
+rm -f "$TEMP_CONFIG"
+log "✅ Kubeconfig configured!"
+
+# Verify kubectl access
+log "🔍 Verifying kubectl access..."
 if ! kubectl get nodes >> "$LOG_FILE" 2>&1; then
     log "❌ Failed to verify kubectl! Check $LOG_FILE"
-    microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
+    multipass exec "$VM_NAME" -- /snap/bin/microk8s inspect >> "$LOG_DIR/microk8s_inspect.log" 2>&1
     exit 1
 fi
-log "✅ kubectl configured!"
+log "✅ kubectl verified! Cluster is accessible."
 
-# Install k6
-if ! command -v k6 >/dev/null; then
-    log "📌 Installing k6..."
-    if [[ "$PKG_MANAGER" == "snap" ]]; then
-        snap install k6 || {
-            log "❌ Failed to install k6 via snap!"
-            exit 1
-        }
-    elif [[ "$PKG_MANAGER" == "brew" ]]; then
-        brew install k6 || {
-            log "❌ Failed to install k6 via brew!"
-            exit 1
-        }
-    fi
-fi
-log "✅ k6 installed!"
-
-log "\n✅ Installation completed successfully!"
+log "\n✅ Setup completed successfully!"
 log "📜 Logs available in: $LOG_FILE"
-log "🚀 Run the simulation with: sudo bash scripts/run_simulation.sh [dqn|ppo] [true|false]"
-log "🔗 Grafana will be available at: http://localhost:3000 after running the simulation"
+log "🔗 Run 'kubectl get nodes' to verify cluster."
+log "🔗 Access VM with 'multipass shell $VM_NAME'."

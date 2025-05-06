@@ -2,6 +2,8 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from typing import Tuple, Dict, Any
+
+import psutil
 from .mock_kubernetes_api import MockKubernetesAPI
 
 class MicroK8sEnvSimulated(gym.Env):
@@ -34,61 +36,165 @@ class MicroK8sEnvSimulated(gym.Env):
         self.state = self._observe()
         return self.state, {}
 
+    # def step(self, action):
+    #     self.current_step += 1
+
+    #     current_state = self.api.get_cluster_state()
+    #     current_pods = current_state["pods"]
+
+    #     if action == 0:
+    #         target_pods = current_pods
+    #     elif action == 1:
+    #         target_pods = current_pods + 1
+    #     else:
+    #         target_pods = current_pods - 1
+
+    #     self.api.safe_scale("autoscaler", target_pods)
+    #     next_state = self.api.get_cluster_state()
+    #     obs = self._get_obs(next_state)
+
+    #     # Reward shaping (CPU & memory in target range, penalize high swap)
+    #     cpu = next_state["cpu"]
+    #     memory = next_state["memory"]
+    #     swap = next_state["swap"]  # in bytes
+
+    #     reward = 0
+
+    #     # CPU reward
+    #     if 0.4 <= cpu <= 0.8:
+    #         reward += 1
+    #     else:
+    #         reward -= abs(cpu - 0.6)
+
+    #     # Memory reward
+    #     normalized_memory = memory / 500e6  # max memory
+    #     if 0.3 <= normalized_memory <= 0.7:
+    #         reward += 1
+    #     else:
+    #         reward -= abs(normalized_memory - 0.5)
+
+    #     # Swap penalty
+    #     swap_penalty = swap / 200e6  # normalized to [0, 1]
+    #     reward -= swap_penalty * 2  # stronger penalty if swap > 100MB
+
+    #     terminated = False
+    #     truncated = self.current_step >= self.max_steps
+    #     info = {
+    #         "custom_metrics": {
+    #             "cpu_utilization": cpu,
+    #             "memory_utilization": normalized_memory,
+    #             "pod_count": next_state["pods"],
+    #             "swap_usage": swap,
+    #             "scaling_action": action - 1  # -1, 0, 1
+    #         }
+    #     }
+
+    #     info["cluster_metrics"] = {
+    #         "cpu_utilization": psutil.cpu_percent(),
+    #         "memory_utilization": psutil.virtual_memory().percent,
+    #         "pod_count": self.api.get_cluster_state,
+    #     }
+    #     return obs, reward, terminated, truncated, info
+
     def step(self, action):
         self.current_step += 1
 
+        # Get current state
         current_state = self.api.get_cluster_state()
         current_pods = current_state["pods"]
+        desired_pods = current_state.get("desired_replicas", current_pods)  # From MockAPI
 
+        # Apply action (0=no-op, 1=scale up, 2=scale down)
         if action == 0:
             target_pods = current_pods
         elif action == 1:
-            target_pods = current_pods + 1
+            target_pods = min(current_pods + 1, self.api.max_pods)
         else:
-            target_pods = current_pods - 1
+            target_pods = max(current_pods - 1, 1)  # Never scale below 1 pod
 
-        self.api.safe_scale("autoscaler", target_pods)
+        # Simulate scaling operation and track success
+        scaling_success = self.api.safe_scale("autoscaler", target_pods)
         next_state = self.api.get_cluster_state()
         obs = self._get_obs(next_state)
 
-        # Reward shaping (CPU & memory in target range, penalize high swap)
-        cpu = next_state["cpu"]
-        memory = next_state["memory"]
-        swap = next_state["swap"]  # in bytes
-
+        # --- Reward Engineering ---
         reward = 0
+        cpu = next_state["cpu"]
+        memory = next_state["memory"] / 500e6  # Normalized to [0,1]
+        swap = next_state["swap"] / 200e6     # Normalized to [0,1]
+        latency = next_state.get("latency", 0.0)
+        actual_pods = next_state["pods"]
 
-        # CPU reward
-        if 0.4 <= cpu <= 0.8:
-            reward += 1
-        else:
-            reward -= abs(cpu - 0.6)
+        # 1. Target range bonuses (CPU/Memory)
+        reward += 1.0 if (0.4 <= cpu <= 0.8) else -abs(cpu - 0.6)
+        reward += 1.0 if (0.3 <= memory <= 0.7) else -abs(memory - 0.5)
 
-        # Memory reward
-        normalized_memory = memory / 500e6  # max memory
-        if 0.3 <= normalized_memory <= 0.7:
-            reward += 1
-        else:
-            reward -= abs(normalized_memory - 0.5)
+        # 2. Penalties (Swap, Scaling Issues)
+        reward -= swap * 2  # Heavy penalty for swap usage
+        
+        # Penalize scaling failures
+        if not scaling_success:
+            reward -= 1.0
+            
+        # Small penalty for scaling actions to encourage stability
+        if action != 0:
+            reward -= 0.1
 
-        # Swap penalty
-        swap_penalty = swap / 200e6  # normalized to [0, 1]
-        reward -= swap_penalty * 2  # stronger penalty if swap > 100MB
+        # 3. Dynamic pod count optimization (replaces ideal_pod_count)
+        optimal_pods = max(1, min(
+            int(cpu / 0.6),  # Estimate based on CPU target
+            int(memory / 0.5)  # Estimate based on memory target
+        ))
+        reward -= 0.05 * abs(actual_pods - optimal_pods)
 
-        terminated = False
-        truncated = self.current_step >= self.max_steps
+        # --- Metrics Tracking ---
+        scaling_lag = desired_pods - actual_pods
+        scaling_efficiency = 1 - (abs(scaling_lag) / self.api.max_pods)
+
         info = {
             "custom_metrics": {
+                # Resource metrics
                 "cpu_utilization": cpu,
-                "memory_utilization": normalized_memory,
-                "pod_count": next_state["pods"],
+                "memory_utilization": memory,
                 "swap_usage": swap,
-                "scaling_action": action - 1  # -1, 0, 1
+                "latency": latency,
+                
+                # Scaling metrics
+                "pod_count": actual_pods,
+                "desired_pods": desired_pods,
+                "optimal_pods": optimal_pods,
+                "scaling_lag": scaling_lag,
+                "scaling_efficiency": scaling_efficiency,
+                "scaling_success": float(scaling_success),
+                "scaling_action": action - 1,  # -1, 0, 1
+                
+                # Reward components
+                "reward_components": {
+                    "cpu_reward": 1.0 if (0.4 <= cpu <= 0.8) else -abs(cpu - 0.6),
+                    "memory_reward": 1.0 if (0.3 <= memory <= 0.7) else -abs(memory - 0.5),
+                    "swap_penalty": -swap * 2,
+                    "scaling_penalty": -0.1 if action != 0 else 0,
+                    "optimal_pods_penalty": -0.05 * abs(actual_pods - optimal_pods)
+                }
+            },
+            "cluster_metrics": {
+                "actual_cpu": psutil.cpu_percent() / 100,  # Normalized
+                "actual_memory": psutil.virtual_memory().percent / 100,
+                "actual_pods": self.api.get_current_pod_count(),
             }
         }
 
-        return obs, reward, terminated, truncated, info
+        # --- Termination Conditions ---
+        terminated = False
+        truncated = self.current_step >= self.max_steps
+        
+        # Early termination if system is unstable
+        if swap > 0.8 or cpu > 0.9 or memory > 0.9:  # Dangerous thresholds
+            terminated = True
+            reward -= 5  # Large penalty for instability
 
+        return obs, reward, terminated, truncated, info
+    
     def _get_obs(self, state):
         return np.array([
             state["cpu"],

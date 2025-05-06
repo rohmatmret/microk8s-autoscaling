@@ -5,12 +5,13 @@ import os
 import logging
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList,BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 import wandb
 from wandb.integration.sb3 import WandbCallback
 from agent.environment import MicroK8sEnv
 from agent.environment_simulated import MicroK8sEnvSimulated
+from agent.system_callback_metrics import SystemMetricsCallback
 
 # Configure logging
 logging.basicConfig(
@@ -20,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-EXP_NAME = "ppo_autoscaling_rewardshape"
+EXP_NAME = "ppo_ac_rewardshape"
 LR = 3e-4
 ENV_NAME = "microk8s_env"
 RUNID = f"{EXP_NAME}_lr{LR:.0e}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -37,7 +38,16 @@ class CustomEvalCallback(EvalCallback):
                     "train/global_step": self.num_timesteps
                 })
                 
+            if hasattr(self.eval_env, "get_cluster_metrics"):  # Add this method to your env
+                metrics = self.eval_env.get_cluster_metrics()
+                wandb.log({
+                    "cluster/cpu_util": metrics["cpu"],
+                    "cluster/memory_util": metrics["memory"],
+                    "cluster/pod_count": metrics["pods"],
+                })
+                
         return result
+    
 class PPOAgent:
     """PPO agent for MicroK8s autoscaling."""
 
@@ -57,7 +67,7 @@ class PPOAgent:
         # Initialize wandb
         wandb.init(
             project="microk8s_rl_autoscaling",
-            entity="rohmatmret-institute-teknologi-sepuluh-nopember",
+            # entity="rohmatmret-institute-teknologi-sepuluh-nopember",
             name=RUNID,
             id=RUNID,
             resume="allow",
@@ -77,6 +87,7 @@ class PPOAgent:
                 "vf_coef": 0.5,
                 "policy": "MlpPolicy",
             },
+            tensorboard=True,
             tags=["PPO", "autoscaling", "reward shaping", ENV_NAME],
             notes="Eksperimen dengan reward shaping dan PPO baseline."
         )
@@ -86,11 +97,15 @@ class PPOAgent:
         wandb.define_metric("custom/memory_utilization", step_metric="train/global_step")
         wandb.define_metric("custom/pod_count", step_metric="train/global_step")
 
+        wandb.define_metric("scaling/*", step_metric="train/global_step")
+        wandb.define_metric("resources/*", step_metric="train/global_step")
+
         wandb.config.update({
             "custom_metrics": {
                 "target_cpu_range": [0.4, 0.8],
                 "target_memory_range": [0.3, 0.7],
                 "ideal_pod_count": 5,
+                "swap":0
             }
         })
         wandb.Settings(init_timeout=180)
@@ -120,11 +135,15 @@ class PPOAgent:
         
         """Train the PPO model."""
         try:
+            # --- Callback Setup ---
+            callbacks = []
+            
             checkpoint_callback = CheckpointCallback(
                 save_freq=checkpoint_freq,
                 save_path=self.model_dir,
                 name_prefix="ppo_model"
             )
+            callbacks.append(checkpoint_callback)
 
             eval_callback = CustomEvalCallback(
                 eval_env=self.eval_env,
@@ -135,6 +154,7 @@ class PPOAgent:
                 render=False,
                 n_eval_episodes=eval_episodes
             )
+            callbacks.append(eval_callback)
 
             wandb_callback = WandbCallback(
                 model_save_path=f"{self.model_dir}/wandb",
@@ -143,12 +163,46 @@ class PPOAgent:
                 gradient_save_freq=100,
                 model_save_freq=checkpoint_freq,
             )
+            
+            callbacks.append(wandb_callback)
+            
+            system_callback = SystemMetricsCallback(self.env,
+                                log_freq=1000,
+                                metrics_to_track=[
+                                    'cpu_utilization',
+                                    'memory_utilization',
+                                    'pod_count',
+                                    'scaling_lag'
+                                ]
+                            )
+            
+            callbacks.append(system_callback)
 
-            callback = CallbackList([checkpoint_callback, eval_callback, wandb_callback])
+            # callback = CallbackList([checkpoint_callback, eval_callback, wandb_callback,system_callback])
+            class ProgressLogger(BaseCallback):
+                "progress"
+                def __init__(self, check_interval=1000):
+                    super().__init__()
+                    self.check_interval = check_interval
+                
+                def _on_step(self) -> bool:
+                    if self.n_calls % self.check_interval == 0:
+                        logger.info("Progress: %.1f%%", 100 * self.num_timesteps / total_timesteps)
+                        if hasattr(self.model, 'env'):
+                            try:
+                                wandb.log({
+                                    "progress": self.num_timesteps/total_timesteps,
+                                    "timesteps": self.num_timesteps
+                                })
+                            except:
+                                logger.warning("Failed to log progress to W&B")
+                    return True
+                    
+            callbacks.append(ProgressLogger())
 
             self.model.learn(
                 total_timesteps=total_timesteps,
-                callback=callback,
+                callback=CallbackList(callbacks),
                 log_interval=10
             )
             self.save()
@@ -235,7 +289,7 @@ def parse_args():
         help='Use simulated environment')
     parser.add_argument('--eval-episodes', type=int, default=100,
         help='Number of evaluation episodes')
-    parser.add_argument('--timesteps', type=int, default=50000,
+    parser.add_argument('--timesteps', type=int, default=100000,
         help='Total training timesteps') 
 
     return parser.parse_args()
