@@ -16,11 +16,11 @@ This project integrates **MicroK8s** (lightweight Kubernetes) with **Reinforceme
 
 ## 🛠 Requirements
 ### Hardware
-| Component | Minimum Specs            | Notes                        |
-| --------- | ------------------------ | ---------------------------- |
-| OS        | Ubuntu 20.04+/Debian 11+ | WSL2/Docker (Windows/macOS)  |
-| CPU       | 2 cores                  | For MicroK8s + RL            |
-| RAM       | 4 GB                     | 2 GB MicroK8s, 2 GB app      |
+| Component | Minimum Specs            | Notes                       |
+| --------- | ------------------------ | --------------------------- |
+| OS        | Ubuntu 20.04+/Debian 11+ | WSL2/Docker (Windows/macOS) |
+| CPU       | 2 cores                  | For MicroK8s + RL           |
+| RAM       | 4 GB                     | 2 GB MicroK8s, 2 GB app     |
 
 ### This project implements an adaptive autoscaling solution for startups using:
 - **MicroK8s** (lightweight Kubernetes distribution)
@@ -98,7 +98,7 @@ multipass version
 2. Launch a MicroK8s VM with Multipass
 ```sh
 # Create a dedicated VM (4GB RAM, 20GB disk)
-multipass launch --name microk8s-vm --mem 4G --disk 20G
+multipass launch --name microk8s-vm --cpus 2 --memory 4G --disk 20G
 
 # Install MicroK8s inside the VM
 multipass exec microk8s-vm -- sudo snap install microk8s --classic
@@ -114,7 +114,7 @@ microk8s-vm     Running           192.168.64.x
 
 // If not running: Start it with command
 
-multipass start microk8s-vm.
+multipass start microk8s-vm
 
 ```
 3. Install MicroK8s in the VM
@@ -143,6 +143,25 @@ Log out and back in to apply group changes:
 ```sh
 exit
 multipass shell microk8s-vm
+```
+
+# Konfigurasi Kubeconfig untuk Akses dari Host
+Setup Config kubectl from local machine, copy file config from VM
+
+Get Config from VM
+```sh
+multipass exec microk8s-vm -- /snap/bin/microk8s config > ~/.kube/microk8s-config
+```
+
+## Gabungkan dengan kubeconfig lokal:
+```sh
+KUBECONFIG=~/.kube/config:~/.kube/microk8s-config kubectl config view --flatten > ~/.kube/merged_kubeconfig
+mv ~/.kube/merged_kubeconfig ~/.kube/config
+```
+
+## Uji akses dari macOS:
+```sh
+kubectl get nodes
 ```
 
 
@@ -208,8 +227,8 @@ microk8s kubectl get secret -n monitoring grafana -o jsonpath='{.data.admin-pass
 ```sh
 microk8s kubectl port-forward -n monitoring svc/grafana 3000:80
 ```
-Access at http://localhost:3000 (Username: admin, Password from Step 4).
 
+Access at http://localhost:3000 (Username: admin, Password from Step 4).
 
 
 ## Manual Load Test
@@ -219,6 +238,39 @@ kubectl create configmap k6-load-script --from-file=load-test/load-test.js
 ```
 
 
+## 🧩 Ensure Components Are Running
+
+| Component                     | Namespace   | Check Status Command                           | Criteria / Ideal Status                     |
+|-------------------------------|-------------|------------------------------------------------|---------------------------------------------|
+| ✅ Ingress Controller Pod     | ingress     | `kubectl -n ingress get pods --show-labels`   | Status = `Running`, READY = `1/1`, label `name=nginx-ingress-microk8s` |
+| ✅ Ingress Controller Service | ingress     | `kubectl -n ingress get svc nginx-ingress-controller` | Type = `NodePort`, has `Endpoints` |
+| ✅ Ingress Endpoints          | ingress     | `kubectl -n ingress get endpoints nginx-ingress-controller` | Should show backend Pod IP:Port |
+| ✅ Ingress Resource           | app-specific| `kubectl get ingress -A`<br>`kubectl describe ingress <name>` | Host/path/backend correct, no errors |
+| ✅ Backend App Pod            | default/app | `kubectl get pods -n <namespace>`             | Status = `Running`                         |
+| ✅ Backend Service            | default/app | `kubectl get svc -n <namespace>`              | Type = ClusterIP/NodePort, matches Ingress |
+| ✅ HPA (Autoscaler)           | default/app | `kubectl get hpa -n <namespace>`              | Active, target matches Pod                |
+| ✅ Metrics Server/Prometheus  | monitoring  | `kubectl get pods -n monitoring`              | Status = `Running`                        |
+| ✅ Network Access             | -           | `curl http://<hostname>` / browser            | Returns OK response                       |
+
+---
+
+# Quick Troubleshooting
+
+| Symptom                     | Check                                 | Solution                                           |
+|-----------------------------|---------------------------------------|---------------------------------------------------|
+| Ingress inaccessible        | `nginx-ingress-controller` Service    | Verify `selector`, ensure endpoints appear       |
+| 404 from Ingress            | Ingress resource or backend service   | Check path, host, target service, and port       |
+| `port-forward` fails        | Empty endpoints                       | Verify label/selector matches                    |
+| Autoscaling not working     | HPA + Metrics server                  | Ensure metrics available and target resource matches |
+| Cannot access from host     | Node IP, NodePort port, firewall      | Use `/etc/hosts` or `port-forward` from host     |
+| Ingress log errors          | Controller logs                       | `kubectl -n ingress logs <nginx-pod>`            |
+
+
+## Validate yaml Client 
+
+```sh
+kubectl apply -f simulation --dry-run=client 
+```
 
 
 # Infrastructure Architecture 
