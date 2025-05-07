@@ -11,6 +11,7 @@ from wandb.integration.sb3 import WandbCallback
 
 from agent.environment_simulated import MicroK8sEnvSimulated
 from agent.environment import MicroK8sEnv
+from agent.traffic_simulation import TrafficSimulator
 
 import wandb
 
@@ -26,6 +27,36 @@ ENV_NAME = "microk8s_env"
 EXP_NAME = "dqn_autoscaling_rewardshape"
 LR = 3e-4
 RUNID = f"dqn_{ENV_NAME[:5]}_lr{LR:.0e}_{datetime.now().strftime('%m%d%H%M')}"
+
+class VisualizationCallback(BaseCallback):
+    """Custom callback for plotting metrics."""
+    
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.resource_history = []
+        self.action_history = []
+        
+    def _on_step(self) -> bool:
+        info = self.locals['infos'][0]
+        custom_metrics = info.get('custom_metrics', {})
+        self.resource_history.append(custom_metrics.get('cpu_utilization', 0))
+        self.action_history.append(self.locals['actions'][0])
+        
+        if len(self.resource_history) % 100 == 0:
+            try:
+                wandb.log({
+                    "resource_trends": wandb.plot.line_series(
+                        xs=range(len(self.resource_history)),
+                        ys=[self.resource_history],
+                        keys=["CPU Utilization"],
+                        title="Resource Trends"
+                    ),
+                    "train/global_step": self.model.num_timesteps
+                })
+            except wandb.Error as e:
+                logger.warning("Failed to log resource trends: %s", e)
+                
+        return True
 
 class DQNAgent:
     """DQN agent with comprehensive autoscaling metrics tracking."""
@@ -45,6 +76,19 @@ class DQNAgent:
                 - gamma: Discount factor
         """
         try:
+            # Traffic Pattern Visualization
+            steps = 3000
+            traffic_simulator = TrafficSimulator()
+            traffic_data = [[step, traffic_simulator.get_load(step)] for step in range(steps)]
+            traffic_table = wandb.Table(data=traffic_data, columns=["step", "load"])
+            
+            wandb.log({
+                "traffic_pattern": wandb.plot.line(
+                    traffic_table, "step", "load",
+                    title="Simulated Traffic Pattern"
+                )
+            })
+
             self.env = make_vec_env(lambda:environment, n_envs=1)
             self.is_simulated = is_simulated
             self.eval_env = make_vec_env(lambda: environment, n_envs=1)
@@ -89,7 +133,7 @@ class DQNAgent:
                     "environment": "simulated" if self.is_simulated else "real",
                     "learning_rate": config.get('learning_rate', 0.0005),
                     "buffer_size": config.get('buffer_size', 100000),
-                    "batch_size": config.get('batch_size', 100),
+                    "batch_size": config.get('batch_size', 64),
                     "gamma": config.get('gamma', 0.99),
                     "exploration_fraction": config.get('exploration_fraction', 0.2),
                     "exploration_final_eps": config.get('exploration_final_eps', 0.005),
@@ -143,7 +187,7 @@ class DQNAgent:
             self.model.learn(
                 total_timesteps=total_timesteps,
                 callback=callbacks,
-                log_interval=100,
+                log_interval=10,
                 tb_log_name=tb_log_name
             )
             
@@ -200,21 +244,42 @@ class DQNAgent:
             def _log_cluster_metrics(self, info: Dict[str, Any]):
                 """Log cluster resource utilization metrics."""
                 if 'cluster_metrics' in info:
+                    metrics = info['cluster_metrics']
                     wandb.log({
-                        "cluster/cpu_util": info['cluster_metrics']['cpu'],
-                        "cluster/memory_util": info['cluster_metrics']['memory'],
-                        "cluster/pod_count": info['cluster_metrics']['pods'],
-                        "cluster/latency": info['cluster_metrics']['latency']
+                        "cluster/cpu_util": metrics.get('actual_cpu', 0),
+                        "cluster/memory_util": metrics.get('actual_memory', 0), 
+                        "cluster/pod_count": metrics.get('actual_pods', 0),
+                        "cluster/latency": metrics.get('latency', 0)
                     }, commit=False)
 
             def _log_scaling_actions(self):
                 """Analyze and log scaling action patterns."""
                 actions = np.array(self.action_history)
+                action_counts = {
+                    "scale_down": np.sum(actions == 0),
+                    "no_change": np.sum(actions == 1),
+                    "scale_up": np.sum(actions == 2)
+                }
+                
+                # Create action distribution table
+                action_table = wandb.Table(
+                    columns=["Action", "Count"],
+                    data=[
+                        ["Scale Down", action_counts["scale_down"]],
+                        ["No Change", action_counts["no_change"]],
+                        ["Scale Up", action_counts["scale_up"]]
+                    ]
+                )
+                
                 wandb.log({
-                    "actions/scale_up": np.sum(actions == 2),
-                    "actions/no_change": np.sum(actions == 1),
-                    "actions/scale_down": np.sum(actions == 0),
-                    "actions/mean_action": np.mean(actions)
+                    "actions/scale_up": action_counts["scale_up"],
+                    "actions/no_change": action_counts["no_change"],
+                    "actions/scale_down": action_counts["scale_down"],
+                    "actions/mean_action": np.mean(actions),
+                    "eval_summary/action_distribution": wandb.plot.bar(
+                        action_table, "Action", "Count",
+                        title="Action Distribution"
+                    )
                 }, commit=False)
 
         return CallbackList([
@@ -236,7 +301,8 @@ class DQNAgent:
                 verbose=2,
                 log="all"
             ),
-            AutoscalingMetricsCallback()
+            AutoscalingMetricsCallback(),
+            VisualizationCallback()
         ])
 
     def evaluate(self, episodes: int = 100) -> float:
@@ -289,21 +355,19 @@ class DQNAgent:
                     logger.debug("Current info: %s ",current_info)
 
                     # Map custom_metrics to cluster_metrics
-                    if 'custom_metrics' in current_info:
-                        custom_metrics = current_info['custom_metrics']
-                        cluster_metrics['cpu'].append(custom_metrics.get('cpu_utilization', 0))
-                        cluster_metrics['memory'].append(custom_metrics.get('memory_utilization', 0))
-                        cluster_metrics['pods'].append(custom_metrics.get('pod_count', 0))
-                        cluster_metrics['latency'].append(custom_metrics.get('latency', 0))
-                        cluster_metrics['swap'].append(custom_metrics.get('swap_usage', 0))
-                    elif 'cluster_metrics' in current_info:
-                        cluster_metrics['cpu'].append(current_info['cluster_metrics'].get('cpu', 0))
-                        cluster_metrics['memory'].append(current_info['cluster_metrics'].get('memory', 0))
-                        cluster_metrics['pods'].append(current_info['cluster_metrics'].get('pods', 0))
-                        cluster_metrics['latency'].append(current_info['cluster_metrics'].get('latency', 0))
-                        cluster_metrics['swap'].append(custom_metrics.get('swap_usage', 0))
-                    else:
-                        logger.warning("No custom_metrics in info: %s" ,current_info)
+                    custom_metrics = current_info.get('custom_metrics', {})
+                    cluster_metrics['cpu'].append(custom_metrics.get('cpu_utilization', 0))
+                    cluster_metrics['memory'].append(custom_metrics.get('memory_utilization', 0))
+                    cluster_metrics['pods'].append(custom_metrics.get('pod_count', 0))
+                    cluster_metrics['latency'].append(custom_metrics.get('latency', 0))
+                    cluster_metrics['swap'].append(custom_metrics.get('swap_usage', 0))
+
+                    # cluster_metrics = current_info.get('cluster_metrics', {})
+                    # cluster_metrics['cpu'].append(cluster_metrics.get('cpu_utilization', 0))
+                    # cluster_metrics['memory'].append(cluster_metrics.get('memory_utilization', 0))
+                    # cluster_metrics['pods'].append(cluster_metrics.get('pod_count', 0))
+                    # cluster_metrics['latency'].append(cluster_metrics.get('latency', 0))
+                    # cluster_metrics['swap'].append(cluster_metrics.get('swap_usage', 0))
 
                 # Log episode reward after episode completes
                 rewards.append(episode_reward)
@@ -311,19 +375,47 @@ class DQNAgent:
 
             # Log aggregated metrics with safeguards for empty lists
             avg_reward = np.mean(rewards)
+            action_counts = {
+                "scale_down": np.sum(np.array(action_history) == 0),
+                "no_change": np.sum(np.array(action_history) == 1),
+                "scale_up": np.sum(np.array(action_history) == 2)
+            }
+            
+            # Create action distribution table
+            action_table = wandb.Table(
+                columns=["Action", "Count"],
+                data=[
+                    ["Scale Down", action_counts["scale_down"]],
+                    ["No Change", action_counts["no_change"]],
+                    ["Scale Up", action_counts["scale_up"]]
+                ]
+            )
+            
             wandb.log({
-               "eval/mean_reward": avg_reward,
+                "eval/mean_reward": avg_reward,
                 "eval/std_reward": np.std(rewards),
                 "eval/cpu_mean": np.mean(cluster_metrics['cpu']) if cluster_metrics['cpu'] else 0,
                 "eval/memory_mean": np.mean(cluster_metrics['memory']) if cluster_metrics['memory'] else 0,
                 "eval/swap_mean": np.mean(cluster_metrics['swap']) if cluster_metrics['swap'] else 0,
                 "eval/pod_mean": np.mean(cluster_metrics['pods']) if cluster_metrics['pods'] else 0,
-                "eval/scale_ups": np.sum(np.array(action_history) == 2),
-                "eval/scale_downs": np.sum(np.array(action_history) == 0)
+                "eval/scale_ups": action_counts["scale_up"],
+                "eval/scale_downs": action_counts["scale_down"],
+                "eval/action_distribution": action_counts,
+                "eval_summary/action_distribution": wandb.plot.bar(
+                    action_table, "Action", "Count",
+                    title="Action Distribution"
+                ),
+                "train/global_step": self.model.num_timesteps,
+                "eval_summary/resource_trend": wandb.plot.line_series(
+                    xs=range(len(cluster_metrics['cpu'])),
+                    ys=[cluster_metrics['cpu']],
+                    keys=["CPU Utilization"],
+                    title="Resource Trends"
+                )
             })
 
             # Debug action history
-            logger.info("Scale ups: %d, Scale downs: %d", np.sum(np.array(action_history) == 2), np.sum(np.array(action_history) == 0))
+            logger.info("Scale ups: %d, Scale downs: %d", action_counts["scale_up"], action_counts["scale_down"])
 
             logger.info("Evaluation completed. Avg reward: %.2f", avg_reward)
             return avg_reward

@@ -82,3 +82,18 @@ help:
 	@echo "  clean           : Remove venv, logs, and MicroK8s"
 	@echo "  help            : Show this help"
 	@echo "Example: sudo make start-simulation AGENT=ppo SKIP_LOADTEST=false"
+
+
+
+# Run training simulation
+
+.PHONY: train-simulation
+train-simulation: check-sudo
+	@echo "Training ......."
+	@echo "🚀 Starting training simulation with agent: $(AGENT), mode: $(ENV_MODE)"
+	@bash scripts/training.sh $(AGENT) $(ENV_MODE) $(TIMESTEPS) $(EVAL_EPISODES)
+	@echo "✅ Training simulation started! Logs in $(LOG_DIR)/training-*.log"
+
+# Alias for start-simulation
+.PHONY: train
+start: train-simulation

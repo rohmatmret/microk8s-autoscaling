@@ -1,3 +1,4 @@
+import random
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -6,20 +7,25 @@ from typing import Tuple, Dict, Any
 import psutil
 from .mock_kubernetes_api import MockKubernetesAPI
 
+def event_traffic(step):
+    base = 100 * (1 + 0.3 * np.sin(2 * np.pi * step / 1440))
+    # Special events at steps 1000 and 2500
+    if 1000 <= step < 1300:  # 5-minute flash sale
+        return base * 25 + random.uniform(-50, 50)
+    elif 2500 <= step < 3100:  # 10-minute holiday sale
+        return base * 30 + random.uniform(-100, 100)
+    return base + random.uniform(-20, 20)
 class MicroK8sEnvSimulated(gym.Env):
     """Simulated MicroK8s environment for autoscaling with Gymnasium compatibility."""
 
     def __init__(self):
         super().__init__()
-        self.api = MockKubernetesAPI()
+        self.api = MockKubernetesAPI(traffic_simulator=event_traffic)
         
         self.action_space = spaces.Discrete(3)  # (-1, 0, +1)
-        
-        # self.observation_space = spaces.Box(
-        #     low=np.array([1, 1, 0.0, 0.0, 0.0]),
-        #     high=np.array([10, 5, 1.0, 500e6, 1.0]),
-        #     dtype=np.float32
-        # )
+        self.pods = 5  # Initial pod count
+        self.cpu_util = 0.4
+        self.memory_util = 0.3
         self.observation_space = spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32)
 
 
@@ -35,66 +41,6 @@ class MicroK8sEnvSimulated(gym.Env):
         self.current_step = 0
         self.state = self._observe()
         return self.state, {}
-
-    # def step(self, action):
-    #     self.current_step += 1
-
-    #     current_state = self.api.get_cluster_state()
-    #     current_pods = current_state["pods"]
-
-    #     if action == 0:
-    #         target_pods = current_pods
-    #     elif action == 1:
-    #         target_pods = current_pods + 1
-    #     else:
-    #         target_pods = current_pods - 1
-
-    #     self.api.safe_scale("autoscaler", target_pods)
-    #     next_state = self.api.get_cluster_state()
-    #     obs = self._get_obs(next_state)
-
-    #     # Reward shaping (CPU & memory in target range, penalize high swap)
-    #     cpu = next_state["cpu"]
-    #     memory = next_state["memory"]
-    #     swap = next_state["swap"]  # in bytes
-
-    #     reward = 0
-
-    #     # CPU reward
-    #     if 0.4 <= cpu <= 0.8:
-    #         reward += 1
-    #     else:
-    #         reward -= abs(cpu - 0.6)
-
-    #     # Memory reward
-    #     normalized_memory = memory / 500e6  # max memory
-    #     if 0.3 <= normalized_memory <= 0.7:
-    #         reward += 1
-    #     else:
-    #         reward -= abs(normalized_memory - 0.5)
-
-    #     # Swap penalty
-    #     swap_penalty = swap / 200e6  # normalized to [0, 1]
-    #     reward -= swap_penalty * 2  # stronger penalty if swap > 100MB
-
-    #     terminated = False
-    #     truncated = self.current_step >= self.max_steps
-    #     info = {
-    #         "custom_metrics": {
-    #             "cpu_utilization": cpu,
-    #             "memory_utilization": normalized_memory,
-    #             "pod_count": next_state["pods"],
-    #             "swap_usage": swap,
-    #             "scaling_action": action - 1  # -1, 0, 1
-    #         }
-    #     }
-
-    #     info["cluster_metrics"] = {
-    #         "cpu_utilization": psutil.cpu_percent(),
-    #         "memory_utilization": psutil.virtual_memory().percent,
-    #         "pod_count": self.api.get_cluster_state,
-    #     }
-    #     return obs, reward, terminated, truncated, info
 
     def step(self, action):
         self.current_step += 1
@@ -151,6 +97,23 @@ class MicroK8sEnvSimulated(gym.Env):
         scaling_lag = desired_pods - actual_pods
         scaling_efficiency = 1 - (abs(scaling_lag) / self.api.max_pods)
 
+        # Simulate resource utilization
+        self.cpu_util = 0.4 + (self.api.traffic_simulator(self.current_step) / 1000)
+        self.memory_util = 0.3 + (self.cpu_util - 0.4)
+
+        # Reward function
+        cpu_target = 0.6  # Midpoint of 0.4–0.8
+        memory_target = 0.5  # Midpoint of 0.3–0.7
+        pod_target = 5
+        reward = (
+            -abs(self.cpu_util - cpu_target) * 10  # Scale to emphasize CPU
+            - abs(self.memory_util - memory_target) * 5
+            - abs(self.pods - pod_target) * 2  # Encourage ideal pod count
+        )
+
+        done = False
+        truncated = False
+
         info = {
             "custom_metrics": {
                 # Resource metrics
@@ -201,40 +164,10 @@ class MicroK8sEnvSimulated(gym.Env):
             state["memory"] / 500e6,
             state["latency"],
             state["swap"] / 200e6,
-            state["nodes"]
-            
+            state["nodes"],
+            # state["pods"]
         ], dtype=np.float32)
         
-    # def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-    #     scaling = action - 1  # Map to (-1, 0, +1)
-    #     current_pods = int(self.state[0])
-    #     desired_replicas = current_pods + scaling
-
-    #     # Attempt to scale
-    #     success = self.api.safe_scale("deployment", desired_replicas)
-
-    #     # Observe new state (after internal update with buffer logic)
-    #     self.state = self._observe()
-
-    #     reward = self._calculate_reward(self.state, scaling, success)
-
-    #     self.current_step += 1
-    #     terminated = False
-    #     truncated = self.current_step >= self.max_steps
-
-    #     info = {
-    #         "pods": self.state[0],
-    #         "nodes": self.state[1],
-    #         "scaling_success": success,
-    #         "custom_metrics": {
-    #             "cpu_utilization": self.state[2],
-    #             "memory_utilization": self.state[3] / 500e6,
-    #             "latency": self.state[4],
-    #             "scaling_action": scaling
-    #         }
-    #     }
-
-    #     return self.state, reward, terminated, truncated, info
 
     def _observe(self) -> np.ndarray:
         state = self.api.get_cluster_state()
@@ -272,3 +205,6 @@ class MicroK8sEnvSimulated(gym.Env):
 
     def close(self):
         pass
+
+    def get_cluster_state(self):
+        return self.api.get_cluster_state()

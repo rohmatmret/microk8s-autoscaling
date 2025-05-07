@@ -12,6 +12,7 @@ from wandb.integration.sb3 import WandbCallback
 from agent.environment import MicroK8sEnv
 from agent.environment_simulated import MicroK8sEnvSimulated
 from agent.system_callback_metrics import SystemMetricsCallback
+from agent.traffic_simulation import TrafficSimulator
 
 # Configure logging
 logging.basicConfig(
@@ -26,6 +27,33 @@ LR = 3e-4
 ENV_NAME = "microk8s_env"
 RUNID = f"{EXP_NAME}_lr{LR:.0e}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+class VisualizationCallback(BaseCallback):
+    """Callback to log resource utilization and scaling metrics to wandb."""
+    def __init__(self, env, log_freq=1000):
+        super().__init__()
+        self.env = env
+        self.log_freq = log_freq
+        self.scaling_actions = []
+        
+    def _on_step(self) -> bool:
+        if self.n_calls % self.log_freq == 0:
+            try:
+                # Resource Utilization Dashboard
+                state = self.env.api.get_cluster_state()
+                wandb.log({
+                    "resources/cpu": state["cpu"],
+                    "resources/memory": state["memory"]/500e6,
+                    "resources/swap": state["swap"]/200e6,
+                    "resources/latency": state["latency"],
+                    "scaling/pod_count": state["pods"],
+                    "scaling/desired_pods": state["desired_replicas"],
+                    "scaling/lag": state["desired_replicas"] - state["pods"],
+                    "train/global_step": self.num_timesteps
+                })
+            except Exception as e:
+                logger.warning("Failed to log visualization metrics: %s ",str(e))
+        return True
+    
 class CustomEvalCallback(EvalCallback):
     def _on_step(self) -> bool:
         result = super()._on_step()
@@ -134,9 +162,13 @@ class PPOAgent:
         eval_episodes=10) -> None:
         
         """Train the PPO model."""
+
         try:
             # --- Callback Setup ---
             callbacks = []
+            
+            vis_callback = VisualizationCallback(self.env)
+            callbacks.append(vis_callback)
             
             checkpoint_callback = CheckpointCallback(
                 save_freq=checkpoint_freq,
@@ -221,10 +253,17 @@ class PPOAgent:
             'swap_usage': [],
             'scaling_actions': []
         }
+        resource_history = []
+
         for episode in range(episodes):
             obs, _ = self.env.reset()
             done = False
             episode_reward =0
+            episode_cpu = []
+            episode_memory = []
+            episode_pods = []
+            episode_swap = []
+            episode_actions = []
             while not done:
                 action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, terminated, truncated, info = self.env.step(action)
@@ -232,40 +271,88 @@ class PPOAgent:
                 episode_reward += reward
                 
                 # Collect metrics
-                if 'custom_metrics' in info:
-                    custom = info['custom_metrics']
-                    metrics['cpu_util'].append(custom.get('cpu_utilization', 0.0))
-                    metrics['memory_util'].append(custom.get('memory_utilization', 0.0))
-                    metrics['pod_counts'].append(custom.get('pod_count', 0))
-                    metrics['swap_usage'].append(custom.get('swap_usage', 0.0))
-                    metrics['scaling_actions'].append(custom.get('scaling_action', 0))
-                    metrics['rewards'].append(episode_reward)
-                elif 'cluster_metrics' in info:
-                    custom = info['cluster_metrics']
-                    metrics['cpu_util'].append(custom.get('cpu_utilization', 0.0))
-                    metrics['memory_util'].append(custom.get('memory_utilization', 0.0))
-                    metrics['pod_counts'].append(custom.get('pod_count', 0))
-                    metrics['swap_usage'].append(custom.get('swap_usage', 0.0))
-                    metrics['scaling_actions'].append(custom.get('scaling_action', 0))
-                    metrics['rewards'].append(episode_reward)
+                custom = info.get('custom_metrics', {})
+                episode_cpu.append(custom.get('cpu_utilization', 0.0))
+                episode_memory.append(custom.get('memory_utilization', 0.0))
+                episode_pods.append(custom.get('pod_count', 0))
+                episode_swap.append(custom.get('swap_usage', 0.0))
+                episode_actions.append(custom.get('scaling_action', 0))
+
+                # cluster_metrics = info.get('cluster_metrics', {})
+                # metrics['cpu_util'].append(cluster_metrics.get('cpu_utilization', 0.0))
+                # metrics['memory_util'].append(cluster_metrics.get('memory_utilization', 0.0))
+                # metrics['pod_counts'].append(cluster_metrics.get('pod_count', 0))
+                # metrics['swap_usage'].append(cluster_metrics.get('swap_usage', 0.0))
+                # metrics['scaling_actions'].append(cluster_metrics.get('scaling_action', 0))
                 
                 logger.info("Episode %d reward: %.2f", episode + 1, episode_reward)
-            
+
+            metrics['rewards'].append(episode_reward)
+            metrics['cpu_util'].extend(episode_cpu)
+            metrics['memory_util'].extend(episode_memory)
+            metrics['pod_counts'].extend(episode_pods)
+            metrics['swap_usage'].extend(episode_swap)
+            metrics['scaling_actions'].extend(episode_actions)
+            resource_history.append(np.mean(episode_cpu))
+
+            try:
+                cpu_mean = np.mean(episode_cpu) if episode_cpu else 0.0
+                pods_mean = np.mean(episode_pods) if episode_pods else 0
+                wandb.log({
+                    f"eval_episode/{episode}/reward": episode_reward,
+                    f"eval_episode/{episode}/cpu": cpu_mean,
+                    f"eval_episode/{episode}/pods": pods_mean,
+                    "train/global_step": self.model.num_timesteps
+                })
+            except wandb.Error as e:
+                logger.warning("Failed to log episode %s Metrick %s ", episode,e)
         # Log aggregated metrics
-        wandb.log({
-            "eval/mean_reward": np.mean(metrics['rewards']),
-            "eval/std_reward": np.std(metrics['rewards']),
-            "eval/mean_cpu": np.mean(metrics['cpu_util']),
-            "eval/mean_memory": np.mean(metrics['memory_util']),
-            "eval/mean_swap": np.mean(metrics['swap_usage']),
-            "eval/mean_pods": np.mean(metrics['pod_counts']),
-            "eval/action_distribution": {
+        try:
+            action_counts = {
                 "scale_down": metrics['scaling_actions'].count(-1),
                 "no_change": metrics['scaling_actions'].count(0),
                 "scale_up": metrics['scaling_actions'].count(1)
             }
-        })
-        
+            wandb.log({
+                "eval/mean_reward": np.mean(metrics['rewards']),
+                "eval/std_reward": np.std(metrics['rewards']),
+                "eval/mean_cpu": np.mean(metrics['cpu_util']),
+                "eval/mean_memory": np.mean(metrics['memory_util']),
+                "eval/mean_swap": np.mean(metrics['swap_usage']),
+                "eval/mean_pods": np.mean(metrics['pod_counts']),
+                "eval/action_distribution": action_counts,
+                "train/global_step": self.model.num_timesteps
+            })
+            # Log action distribution as a bar plot
+            action_table = wandb.Table(
+                columns=["Action", "Count"],
+                data=[
+                    ["Scale Down", action_counts["scale_down"]],
+                    ["No Change", action_counts["no_change"]],
+                    ["Scale Up", action_counts["scale_up"]]
+                ]
+            )
+            wandb.log({
+                "eval_summary/action_distribution": wandb.plot.bar(
+                    action_table,
+                    label="Action",
+                    value="Count",
+                    title="Action Distribution"
+                ),
+                "train/global_step": self.model.num_timesteps
+            })
+            wandb.log({
+                "eval_summary/resource_trend": wandb.plot.line_series(
+                    xs=range(len(resource_history)),
+                    ys=[resource_history],
+                    keys=["CPU Utilization"],
+                    title="Resource Trends"
+                ),
+                "train/global_step": self.model.num_timesteps
+            })
+        except wandb.Error as e:
+            logger.warning("Failed to log aggregated metrics: %s", e)
+            
         return np.mean(metrics['rewards'])
 
     def save(self) -> None:
@@ -283,16 +370,19 @@ class PPOAgent:
       
         
 def parse_args():
-   
-    parser = argparse.ArgumentParser(description='MicroK8s Autoscaler PPO Agent')
-    parser.add_argument('--simulate', action='store_true',
-        help='Use simulated environment')
-    parser.add_argument('--eval-episodes', type=int, default=100,
-        help='Number of evaluation episodes')
-    parser.add_argument('--timesteps', type=int, default=100000,
-        help='Total training timesteps') 
+    """Parse command-line arguments."""
 
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(description='MicroK8s Autoscaler PPO Agent')
+    parser.add_argument('--simulate', action='store_true', help='Use simulated environment')
+    parser.add_argument('--eval-episodes', type=int, default=10, help='Number of evaluation episodes')
+    parser.add_argument('--timesteps', type=int, default=100000, help='Total training timesteps')
+    parsed_args = parser.parse_args()
+    
+    # Set default eval_episodes based on simulation mode
+    if parsed_args.simulate:
+        parsed_args.eval_episodes = 100
+    
+    return parsed_args
 
 
 
@@ -303,13 +393,17 @@ if __name__ == "__main__":
     
     # Create the appropriate environment
     if args.simulate:
+        traffic_simulator = TrafficSimulator(
+            base_load=100,
+            max_spike=30,
+        )
         env = MicroK8sEnvSimulated()
         print("Using SIMULATED environment")
     else:
         env = MicroK8sEnv()  # Your real environment
         print("Using REAL environment")
     # Initialize and train agent
-    agent = PPOAgent(env)
+    agent = PPOAgent(env,batch_size=100)
     agent.train(
         total_timesteps=args.timesteps,
         eval_episodes=args.eval_episodes
