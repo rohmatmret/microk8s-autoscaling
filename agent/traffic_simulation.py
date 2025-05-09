@@ -20,7 +20,7 @@ class TrafficSimulator:
         """Generate realistic traffic pattern with base + spikes + events"""
         # Base load with daily pattern
         daily_variation = self.base_load * 0.3 * np.sin(2 * np.pi * step / 1440)
-        
+        duration = 10
         # Random spikes (Poisson process)
         spike_prob = 0.005
         spike =0

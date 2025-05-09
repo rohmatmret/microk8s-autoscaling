@@ -76,18 +76,6 @@ class DQNAgent:
                 - gamma: Discount factor
         """
         try:
-            # Traffic Pattern Visualization
-            steps = 3000
-            traffic_simulator = TrafficSimulator()
-            traffic_data = [[step, traffic_simulator.get_load(step)] for step in range(steps)]
-            traffic_table = wandb.Table(data=traffic_data, columns=["step", "load"])
-            
-            wandb.log({
-                "traffic_pattern": wandb.plot.line(
-                    traffic_table, "step", "load",
-                    title="Simulated Traffic Pattern"
-                )
-            })
 
             self.env = make_vec_env(lambda:environment, n_envs=1)
             self.is_simulated = is_simulated
@@ -105,6 +93,19 @@ class DQNAgent:
             
             # Initialize DQN with tuned parameters
             self._init_model(kwargs)
+            
+            # Traffic Pattern Visualization
+            steps = 50
+            traffic_simulator = TrafficSimulator()
+            traffic_data = [[step, traffic_simulator.get_load(step)] for step in range(steps)]
+            traffic_table = wandb.Table(data=traffic_data, columns=["step", "load"])
+            
+            wandb.log({
+                "traffic_pattern": wandb.plot.line(
+                    traffic_table, "step", "load",
+                    title="Simulated Traffic Pattern"
+                )
+            })
             
             logger.info("DQN agent initialized (ID: %s)", self.run_id)
             
@@ -176,7 +177,7 @@ class DQNAgent:
             logger.error("Model initialization failed: %s", str(e))
             raise
 
-    def train(self, total_timesteps: int = 100000, eval_episodes: int = 100):
+    def train(self, total_timesteps: int = 50000, eval_episodes: int = 100):
         """Train with comprehensive metrics tracking."""
         try:
             logger.info("Starting training for %d timesteps", total_timesteps)
@@ -449,7 +450,7 @@ def main():
     try:
         parser = argparse.ArgumentParser(description='MicroK8s DQN Autoscaler')
         parser.add_argument('--simulate', action='store_true', help='Use simulated environment')
-        parser.add_argument('--timesteps', type=int, default=100000, help='Training timesteps')
+        parser.add_argument('--timesteps', type=int, default=50000, help='Training timesteps')
         parser.add_argument('--eval-episodes', type=int, default=100, help='Evaluation episodes')
         args = parser.parse_args()
 
