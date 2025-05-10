@@ -106,7 +106,7 @@ class DQNAgent:
                     title="Simulated Traffic Pattern"
                 )
             })
-            
+
             logger.info("DQN agent initialized (ID: %s)", self.run_id)
             
         except Exception as e:
@@ -127,8 +127,8 @@ class DQNAgent:
         try:
             wandb.init(
                 project="microk8s_rl_autoscaling",
-                name=RUNID,
-                id=RUNID,
+                # name=RUNID,
+                # id=RUNID,
                 config={
                     "algorithm": "DQN",
                     "environment": "simulated" if self.is_simulated else "real",
@@ -136,8 +136,10 @@ class DQNAgent:
                     "buffer_size": config.get('buffer_size', 100000),
                     "batch_size": config.get('batch_size', 64),
                     "gamma": config.get('gamma', 0.99),
-                    "exploration_fraction": config.get('exploration_fraction', 0.2),
-                    "exploration_final_eps": config.get('exploration_final_eps', 0.005),
+                    "exploration_fraction": config.get('exploration_fraction', 0.5),
+                    "exploration_final_eps": config.get('exploration_final_eps', 0.1),
+                    "exploration_rate": config.get('exploration_rate', 0.2),
+                    "seed": config.get('seed', 42)
                 },
                 tags=["autoscaling", "DQN", "simulated" if self.is_simulated else "real"],
                 sync_tensorboard=False,
@@ -161,16 +163,16 @@ class DQNAgent:
                 env=self.env,
                 learning_rate=config.get('learning_rate', 0.0005),
                 buffer_size=config.get('buffer_size', 100000),
-                batch_size=config.get('batch_size', 100),
+                batch_size=config.get('batch_size', 64),
                 gamma=config.get('gamma', 0.99),
                 tau=0.01,
                 train_freq=4,
                 learning_starts=config.get('learning_starts', 10000),
                 target_update_interval=config.get('target_update_interval', 10000),
-                exploration_fraction=config.get('exploration_fraction', 0.2),
-                exploration_final_eps=config.get('exploration_final_eps', 0.005),
                 tensorboard_log=f"{self.model_dir}/tensorboard",
                 verbose=1,
+                seed=config.get('seed', 42),
+                policy_kwargs=dict(net_arch=[64,64])
             )
              
         except Exception as e:
@@ -235,11 +237,14 @@ class DQNAgent:
                 self.episode_count += 1
 
             def _log_dqn_metrics(self):
-                """Log DQN-specific exploration and Q-value metrics."""
+                rewards = getattr(self.model, "replay_buffer", None)
+                q_value_mean = 0
+                if rewards is not None and hasattr(rewards, "rewards"):
+                    q_value_mean = np.mean(rewards.rewards[-1000:]) if len(rewards.rewards) > 0 else 0
                 wandb.log({
-                    "dqn/epsilon": self.model.exploration_rate,
-                    "dqn/exploration_steps": self.model.num_timesteps,
-                    "dqn/q_value_mean": np.mean(self.model.replay_buffer.rewards[-1000:]) if hasattr(self.model, 'replay_buffer') else 0,
+                    "dqn/epsilon": getattr(self.model, "exploration_rate", 0),
+                    "dqn/exploration_steps": getattr(self.model, "num_timesteps", 0),
+                    "dqn/q_value_mean": q_value_mean,
                 }, commit=False)
 
             def _log_cluster_metrics(self, info: Dict[str, Any]):
@@ -313,7 +318,7 @@ class DQNAgent:
             rewards = []
             action_history = []
             cluster_metrics = {
-                'cpu': [], 'memory': [], 'pods': [], 'latency': [],'swap':[]
+                'cpu': [], 'memory': [], 'pods': [], 'latency': [],'swap':[],'optimal_pods':[]
             }
 
             for episode in range(episodes):
@@ -412,6 +417,12 @@ class DQNAgent:
                     ys=[cluster_metrics['cpu']],
                     keys=["CPU Utilization"],
                     title="Resource Trends"
+                ),
+                 "eval_summary/pod_comparison": wandb.plot.line_series(
+                    xs=range(len(cluster_metrics['pods'])),
+                    ys=[cluster_metrics['pods'], cluster_metrics['optimal_pods']],
+                    keys=["Actual Pods", "Optimal Pods"],
+                    title="Pod Count Comparison"
                 )
             })
 

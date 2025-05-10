@@ -1,203 +1,433 @@
-import random
+"""Simulated MicroK8s environment for reinforcement learning-based autoscaling.
+
+This module implements a Gymnasium-compatible environment that simulates a MicroK8s cluster
+for training and evaluating autoscaling policies using reinforcement learning.
+"""
+
+import logging
+from typing import Tuple, Dict, List
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from typing import Tuple, Dict, Any
+from collections import deque
 
 import psutil
 from .mock_kubernetes_api import MockKubernetesAPI
+# from .hybird_simulation import HybridTrafficSimulator
+from .traffic_simulation import TrafficSimulator
+# Configure logging
+logger = logging.getLogger(__name__)
 
-def event_traffic(step):
-    base = 100 * (1 + 0.3 * np.sin(2 * np.pi * step / 1440))
-    # Special events at steps 1000 and 2500
-    if 1000 <= step < 1300:  # 5-minute flash sale
-        return base * 25 + random.uniform(-50, 50)
-    elif 2500 <= step < 3100:  # 10-minute holiday sale
-        return base * 30 + random.uniform(-100, 100)
-    return base + random.uniform(-20, 20)
 class MicroK8sEnvSimulated(gym.Env):
     """Simulated MicroK8s environment for autoscaling with Gymnasium compatibility."""
+    MIN_HISTORY_LENGTH = 5  # Minimum number of load history entries required
+    MAX_HISTORY_LENGTH = 1000  # Maximum history size
+    DEFAULT_CPU = 0.4
+    DEFAULT_MEMORY = 0.3
+    DEFAULT_MEMORY_BYTES = DEFAULT_MEMORY * 500e6
+    DEFAULT_NODES = 1
+    LOAD_NORMALIZATION = 5000  # Normalization factor for load values
 
-    def __init__(self):
+    def __init__(self, seed=None, enable_visualization=True):
         super().__init__()
-        self.api = MockKubernetesAPI(traffic_simulator=event_traffic)
+        # self.traffic_simulator = HybridTrafficSimulator(
+        #     base_load=100,
+        #     seed=seed,
+        #     event_frequency=0.005,
+        #     min_intensity=5,
+        #     max_intensity=50,
+        #     min_duration=10,
+        #     max_duration=200
+        # )
+        self.traffic_simulator = TrafficSimulator(
+            base_load=100,
+            max_spike=30,
+            daily_amplitude=0.3,
+            spike_probability=0.005,
+            min_spike_duration=10,
+            max_spike_duration=30,
+            min_load=10,
+            history_size=self.MAX_HISTORY_LENGTH
+        )
+        self.api = MockKubernetesAPI(traffic_simulator=self.traffic_simulator.get_load)
+        self.enable_visualization = enable_visualization
         
-        self.action_space = spaces.Discrete(3)  # (-1, 0, +1)
+        self.action_space = spaces.Discrete(3)  # (0: no-op, 1: scale-up, 2: scale-down)
         self.pods = 5  # Initial pod count
-        self.cpu_util = 0.4
-        self.memory_util = 0.3
-        self.observation_space = spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32)
-
+        self.cpu_util = self.DEFAULT_CPU
+        self.memory_util = self.DEFAULT_MEMORY
+        
+        # Use deque for efficient history management
+        self.load_history = deque(maxlen=self.MAX_HISTORY_LENGTH)
+        self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
+        
+        # Observation space: [cpu, memory, latency, swap, nodes, load_mean, load_gradient]
+        self.observation_space = spaces.Box(
+            low=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
+            high=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            dtype=np.float64
+        )
 
         self.state = None
         self.current_step = 0
         self.max_steps = 100
 
+    def _setup_traffic_events(self):
+        """Setup realistic traffic events."""
+        # Morning peak
+        self.traffic_simulator.add_event(
+            start=360,  # 6 AM
+            duration=120,
+            intensity=2.0,
+            event_type="scheduled"
+        )
+        
+        # Afternoon peak
+        self.traffic_simulator.add_event(
+            start=720,  # 12 PM
+            duration=180,
+            intensity=1.8,
+            event_type="scheduled"
+        )
+        
+        # Evening peak
+        self.traffic_simulator.add_event(
+            start=1080,  # 6 PM
+            duration=240,
+            intensity=2.2,
+            event_type="scheduled"
+        )
+        
+        # Random burst events
+        for _ in range(3):
+            start = np.random.randint(100, 2000)
+            self.traffic_simulator.add_event(
+                start=start,
+                duration=np.random.randint(30, 60),
+                intensity=np.random.uniform(1.5, 2.5),
+                event_type="burst"
+            )
+
     def reset(self, seed: int = None, options: Dict = None) -> Tuple[np.ndarray, Dict]:
         super().reset(seed=seed)
-        self.api = MockKubernetesAPI()
+        self.api = MockKubernetesAPI(traffic_simulator=self.traffic_simulator.get_load)
         if seed is not None:
             self.api.seed(seed)
+            self.traffic_simulator.rng = np.random.default_rng(seed)
         self.current_step = 0
+        self.pods = 1
+        self.cpu_util = self.DEFAULT_CPU
+        self.memory_util = self.DEFAULT_MEMORY
+        
+        # Reset load history
+        self.load_history.clear()
+        self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
+        
+        # Reset traffic events
+        self._setup_traffic_events()
+
         self.state = self._observe()
+        logger.debug("Environment reset: step=%d, pods=%d", self.current_step, self.pods)
         return self.state, {}
 
     def step(self, action):
         self.current_step += 1
 
+        # Get current load with error handling
+        try:
+            current_load = self.traffic_simulator.get_load(self.current_step)
+            self._update_load_history(current_load)
+        except Exception as e:
+            logger.error("Error getting load: %s", str(e))
+            current_load = self.traffic_simulator.base_load
+            self._update_load_history(current_load)
+
         # Get current state
-        current_state = self.api.get_cluster_state()
-        current_pods = current_state["pods"]
-        desired_pods = current_state.get("desired_replicas", current_pods)  # From MockAPI
+        try:
+            current_state = self.api.get_cluster_state()
+            current_pods = current_state["pods"]
+            desired_pods = current_state.get("desired_replicas", current_pods)
+        except Exception as e:
+            current_state = {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, "latency": 0, "swap": 0, "nodes": 1}
+            logger.error("Error getting cluster state in step function: %s", str(e))
+            current_pods = self.pods
+            desired_pods = current_pods
 
-        # Apply action (0=no-op, 1=scale up, 2=scale down)
-        if action == 0:
-            target_pods = current_pods
-        elif action == 1:
-            target_pods = min(current_pods + 1, self.api.max_pods)
-        else:
-            target_pods = max(current_pods - 1, 1)  # Never scale below 1 pod
+        # Apply action
+        try:
+            if action == 0:
+                target_pods = current_pods
+            elif action == 1:
+                target_pods = min(current_pods + 1, self.api.max_pods)
+            else:
+                target_pods = max(current_pods - 1, 1)
 
-        # Simulate scaling operation and track success
-        scaling_success = self.api.safe_scale("autoscaler", target_pods)
-        next_state = self.api.get_cluster_state()
-        obs = self._get_obs(next_state)
+            # Simulate scaling operation
+            scaling_success = self.api.safe_scale("autoscaler", target_pods)
+            next_state = self.api.get_cluster_state()
+            obs = self._get_obs(next_state)
+        except Exception as e:
+            logger.error("Error applying action: %s", str(e))
+            next_state = current_state
+            obs = self._get_obs(next_state)
+            scaling_success = False
 
-        # --- Reward Engineering ---
-        reward = 0
-        cpu = next_state["cpu"]
-        memory = next_state["memory"] / 500e6  # Normalized to [0,1]
-        swap = next_state["swap"] / 200e6     # Normalized to [0,1]
-        latency = next_state.get("latency", 0.0)
-        actual_pods = next_state["pods"]
+        # Reward calculation
+        try:
+            reward = self._calculate_reward(next_state, action, scaling_success)
+        except Exception as e:
+            logger.error("Error calculating reward: %s", str(e))
+            reward = -1.0
 
-        # 1. Target range bonuses (CPU/Memory)
-        reward += 1.0 if (0.4 <= cpu <= 0.8) else -abs(cpu - 0.6)
-        reward += 1.0 if (0.3 <= memory <= 0.7) else -abs(memory - 0.5)
-
-        # 2. Penalties (Swap, Scaling Issues)
-        reward -= swap * 2  # Heavy penalty for swap usage
-        
-        # Penalize scaling failures
-        if not scaling_success:
-            reward -= 1.0
-            
-        # Small penalty for scaling actions to encourage stability
-        if action != 0:
-            reward -= 0.1
-
-        # 3. Dynamic pod count optimization (replaces ideal_pod_count)
-        optimal_pods = max(1, min(
-            int(cpu / 0.6),  # Estimate based on CPU target
-            int(memory / 0.5)  # Estimate based on memory target
-        ))
-        reward -= 0.05 * abs(actual_pods - optimal_pods)
-
-        # --- Metrics Tracking ---
-        scaling_lag = desired_pods - actual_pods
+        # Metrics tracking
+        scaling_lag = desired_pods - next_state["pods"]
         scaling_efficiency = 1 - (abs(scaling_lag) / self.api.max_pods)
-
-        # Simulate resource utilization
-        self.cpu_util = 0.4 + (self.api.traffic_simulator(self.current_step) / 1000)
-        self.memory_util = 0.3 + (self.cpu_util - 0.4)
-
-        # Reward function
-        cpu_target = 0.6  # Midpoint of 0.4–0.8
-        memory_target = 0.5  # Midpoint of 0.3–0.7
-        pod_target = 5
-        reward = (
-            -abs(self.cpu_util - cpu_target) * 10  # Scale to emphasize CPU
-            - abs(self.memory_util - memory_target) * 5
-            - abs(self.pods - pod_target) * 2  # Encourage ideal pod count
-        )
-
-        done = False
-        truncated = False
+        optimal_pods = max(1, min(
+            int(next_state["cpu"] / 0.6),
+            int((next_state["memory"] / 500e6) / 0.5)
+        ))
 
         info = {
             "custom_metrics": {
-                # Resource metrics
-                "cpu_utilization": cpu,
-                "memory_utilization": memory,
-                "swap_usage": swap,
-                "latency": latency,
-                
-                # Scaling metrics
-                "pod_count": actual_pods,
+                "cpu_utilization": next_state["cpu"],
+                "memory_utilization": next_state["memory"] / 500e6,
+                "swap_usage": next_state["swap"] / 200e6,
+                "latency": next_state["latency"],
+                "pod_count": next_state["pods"],
                 "desired_pods": desired_pods,
                 "optimal_pods": optimal_pods,
                 "scaling_lag": scaling_lag,
                 "scaling_efficiency": scaling_efficiency,
                 "scaling_success": float(scaling_success),
-                "scaling_action": action - 1,  # -1, 0, 1
-                
-                # Reward components
+                "scaling_action": action - 1,
+                "load_mean": np.mean(self.load_history) / 5000 if self.load_history else 0,
+                "load_gradient": self._calculate_load_gradient(),
                 "reward_components": {
-                    "cpu_reward": 1.0 if (0.4 <= cpu <= 0.8) else -abs(cpu - 0.6),
-                    "memory_reward": 1.0 if (0.3 <= memory <= 0.7) else -abs(memory - 0.5),
-                    "swap_penalty": -swap * 2,
+                    "cpu_reward": 1.0 if (0.4 <= next_state["cpu"] <= 0.8) else -abs(next_state["cpu"] - 0.6),
+                    "memory_reward": 1.0 if (0.3 <= next_state["memory"] / 500e6 <= 0.7) else -abs(next_state["memory"] / 500e6 - 0.5),
+                    "swap_penalty": -(next_state["swap"] / 200e6),
                     "scaling_penalty": -0.1 if action != 0 else 0,
-                    "optimal_pods_penalty": -0.05 * abs(actual_pods - optimal_pods)
+                    "traffic_response": self._traffic_response_reward(action, next_state)
                 }
             },
             "cluster_metrics": {
-                "actual_cpu": psutil.cpu_percent() / 100,  # Normalized
+                "actual_cpu": psutil.cpu_percent() / 100,
                 "actual_memory": psutil.virtual_memory().percent / 100,
                 "actual_pods": self.api.get_current_pod_count(),
             }
         }
 
-        # --- Termination Conditions ---
-        terminated = False
+        # Termination conditions
+        terminated = next_state["swap"] / 200e6 > 0.8 or next_state["cpu"] > 0.9 or next_state["memory"] / 500e6 > 0.9
         truncated = self.current_step >= self.max_steps
-        
-        # Early termination if system is unstable
-        if swap > 0.8 or cpu > 0.9 or memory > 0.9:  # Dangerous thresholds
-            terminated = True
-            reward -= 5  # Large penalty for instability
+        if terminated:
+            reward -= 5
 
+        logger.debug("Step %d: reward=%f, terminated=%s, truncated=%s", self.current_step, reward, terminated, truncated)
         return obs, reward, terminated, truncated, info
-    
-    def _get_obs(self, state):
-        return np.array([
-            state["cpu"],
-            state["memory"] / 500e6,
-            state["latency"],
-            state["swap"] / 200e6,
-            state["nodes"],
-            # state["pods"]
-        ], dtype=np.float32)
+
+    def _get_obs(self, state: Dict) -> np.ndarray:
+        """Return observation with load trend and gradient using validated state."""
+        state = self._validate_state(state)
         
+        try:
+            # Ensure we have enough history
+            if len(self.load_history) < self.MIN_HISTORY_LENGTH:
+                self.load_history = deque(maxlen=self.MAX_HISTORY_LENGTH)
+                self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
+                
+            load_mean = np.mean(self.load_history) / 5000
+            load_gradient = self._calculate_load_gradient()
+            
+            obs = np.array([
+                state["cpu"],
+                state["memory"] / 500e6,
+                state["latency"],
+                state["swap"] / 200e6,
+                state["nodes"] / self.api.max_nodes,
+                load_mean,
+                load_gradient
+            ], dtype=np.float32)
+            
+            logger.debug("Observation: %s", obs)
+            return obs
+            
+        except Exception as e:
+            logger.error("Error getting observation: %s", str(e))
+            return np.array([
+                self.DEFAULT_CPU,
+                self.DEFAULT_MEMORY,
+                0.0,  # latency
+                0.0,  # swap
+                1.0,  # nodes
+                0.0,  # load_mean
+                0.0   # load_gradient
+            ], dtype=np.float32)
 
     def _observe(self) -> np.ndarray:
-        state = self.api.get_cluster_state()
-        return np.array([
-            state["pods"],
-            state["nodes"],
-            state["cpu"],
-            state["memory"],
-            state["latency"]
-        ], dtype=np.float32)
+        """Get current observation with proper error handling."""
+        try:
+            state = self.api.get_cluster_state()
+            return self._get_obs(state)
+        except Exception as e:
+            logger.error("Error observing state: %s", str(e))
+            return self._get_obs({})  # Will use default values
 
-    def _calculate_reward(self, state: np.ndarray, scaling: int, success: bool) -> float:
-        cpu_util = state[2]
-        memory_util = state[3] / 500e6
-        pod_count = state[0]
+    def _calculate_load_gradient(self) -> float:
+        """Calculate smoothed load gradient using multiple points."""
+        try:
+            if len(self.load_history) < self.MIN_HISTORY_LENGTH:
+                return 0.0
+                
+            # Use last 5 points for gradient calculation
+            recent_loads = np.array(list(self.load_history)[-5:])
+            x = np.arange(len(recent_loads))
+            
+            # Calculate linear regression
+            slope, _ = np.polyfit(x, recent_loads, 1)
+            
+            # Normalize gradient
+            normalized_gradient = slope / self.LOAD_NORMALIZATION
+            
+            # Clip to [-1, 1] range
+            return np.clip(normalized_gradient, -1.0, 1.0)
+            
+        except Exception as e:
+            logger.error("Error calculating load gradient: %s", str(e))
+            return 0.0
 
-        cpu_reward = 1.0 if 0.4 <= cpu_util <= 0.8 else -1.0
-        memory_reward = 1.0 if 0.3 <= memory_util <= 0.7 else -0.5
-        pod_reward = -0.2 * abs(pod_count - 5)
+    def _update_load_history(self, current_load: float):
+        """Update load history with proper error handling."""
+        try:
+            self.load_history.append(current_load)
+        except Exception as e:
+            logger.error("Error updating load history: %s", str(e))
+            # Ensure minimum history length
+            if len(self.load_history) < self.MIN_HISTORY_LENGTH:
+                self.load_history.extend([self.traffic_simulator.base_load] * 
+                                      (self.MIN_HISTORY_LENGTH - len(self.load_history)))
 
-        # Penalize failed scaling actions
-        scaling_penalty = -0.5 if scaling != 0 and not success else 0.0
-
+    def _calculate_reward(self, state: Dict, action: int, success: bool) -> float:
+        """Complete reward calculation incorporating pod count and utilization."""
+        state = self._validate_state(state)
+        cpu = state["cpu"]
+        memory = state["memory"] / 500e6
+        swap = state["swap"] / 200e6
+        pods = state["pods"]
+        max_pods = self.api.max_pods
+        
+        # Ensure sufficient load history
+        if len(self.load_history) < self.MIN_HISTORY_LENGTH:
+            self.load_history = deque(maxlen=self.MAX_HISTORY_LENGTH)
+            self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
+            
+        # Calculate load characteristics
+        load_mean = np.mean(self.load_history) / 5000
+        load_gradient = self._calculate_load_gradient()
+        
+        # 1. Core Resource Efficiency (30%)
+        # More balanced CPU reward
+        cpu_reward = 0.0
+        if cpu < 0.3:  # Low utilization
+            cpu_reward = -0.1 * (0.3 - cpu)  # Reduced penalty for low utilization
+        elif 0.3 <= cpu <= 0.8:  # Good utilization range
+            cpu_reward = 0.15
+        else:  # High utilization
+            cpu_reward = -0.2 * (cpu - 0.8)  # Keep strong penalty for high utilization
+            
+        mem_reward = (1.0 if 0.3 <= memory <= 0.7 else -abs(memory - 0.5)) * 0.15
+        
+        # 2. Pod Utilization Efficiency (30%)
+        # Calculate ideal pod count with more balanced approach
+        load_based_pods = min(max_pods, max(1, round(load_mean * max_pods * 1.1)))  # 10% headroom
+        resource_based_pods = max(1, min(max_pods, 
+            round(max(cpu / 0.6, memory / 0.5))))
+        ideal_pods = max(load_based_pods, resource_based_pods)  # Changed to max for more conservative scaling
+        
+        # More balanced pod utilization reward
+        pod_utilization = 0.0
+        if pods == ideal_pods:
+            pod_utilization = 0.3  # Maximum reward for perfect match
+        else:
+            # More balanced penalty for deviation
+            pod_utilization = -0.3 * (abs(pods - ideal_pods) / max_pods)
+        
+        # 3. Scaling Effectiveness (20%)
+        scaling_efficiency = 0.0
+        if action != 0:  # Only evaluate if scaling action was taken
+            # More balanced scaling rewards
+            if pods > ideal_pods and action == 2:  # Correct scale-down
+                scaling_efficiency = 0.15  # Reduced reward for scale-down
+            elif pods < ideal_pods and action == 1:  # Correct scale-up
+                scaling_efficiency = 0.2  # Keep higher reward for scale-up
+            else:  # Incorrect scaling direction
+                scaling_efficiency = -0.1
+        
+        # 4. Load Pattern Response (20%)
+        load_response = 0.0
+        if abs(load_gradient) > 0.01:  # Significant trend
+            if load_gradient > 0.01 and action == 1:  # Scale up for increasing load
+                load_response = 0.2 if cpu < 0.8 else -0.1
+            elif load_gradient < -0.01 and action == 2:  # Scale down for decreasing load
+                load_response = 0.15 if cpu < 0.3 else -0.1  # Reduced reward for scale-down
+            elif abs(load_gradient) < 0.005 and action == 0:  # No change for stable load
+                load_response = 0.1
+        
+        # 5. Stability Penalties
+        swap_penalty = -swap * 0.1
+        scaling_cost = -0.02 if action != 0 else 0
+        
+        # Combine all components
         total_reward = (
-            0.4 * cpu_reward +
-            0.3 * memory_reward +
-            0.3 * pod_reward +
-            scaling_penalty
+            cpu_reward +
+            mem_reward +
+            pod_utilization +
+            scaling_efficiency +
+            load_response +
+            swap_penalty +
+            scaling_cost
         )
-        return float(total_reward)
+        
+        # Clip final reward
+        total_reward = float(np.clip(total_reward, -1.0, 1.0))
+        
+        logger.debug(
+            "Reward components - CPU: %.2f, Mem: %.2f, Pods: %.2f, Scaling: %.2f, Load: %.2f",
+            cpu_reward, mem_reward, pod_utilization, scaling_efficiency, load_response
+        )
+        
+        return total_reward
+
+    def _traffic_response_reward(self, action: int, state: Dict) -> float:
+        """Reward for responding to traffic patterns."""
+        try:
+            load_gradient = self._calculate_load_gradient()
+            cpu = state["cpu"]
+            pods = state["pods"]
+            reward = 0
+
+            # More balanced traffic response rewards
+            if load_gradient > 0.01:  # Increasing load
+                if action == 1:  # Scale up
+                    reward += 0.5 if cpu < 0.8 else -0.3
+                elif action == 0 and cpu < 0.4:  # No change when utilization is low
+                    reward += 0.2
+            elif load_gradient < -0.01:  # Decreasing load
+                if action == 2:  # Scale down
+                    reward += 0.3 if cpu < 0.3 else -0.3  # Reduced reward for scale-down
+                elif action == 0 and cpu < 0.3:  # No change when utilization is low
+                    reward += 0.2
+            elif abs(load_gradient) < 0.005:  # Stable load
+                if action == 0:  # No change
+                    reward += 0.3
+                elif action == 2 and cpu < 0.3:  # Scale down when utilization is low
+                    reward += 0.1  # Reduced reward for scale-down
+
+            logger.debug("Traffic response reward: %f", reward)
+            return reward
+        except Exception as e:
+            logger.error("Error calculating traffic response reward: %s", str(e))
+            return 0.0
 
     def render(self, mode: str = 'human'):
         if mode == 'human':
@@ -207,4 +437,24 @@ class MicroK8sEnvSimulated(gym.Env):
         pass
 
     def get_cluster_state(self):
-        return self.api.get_cluster_state()
+        try:
+            state = self.api.get_cluster_state()
+            logger.debug("Cluster state: %s", state)
+            return state
+        except Exception as e:
+            logger.error("Error getting cluster state: %s", str(e))
+            return {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, "latency": 0, "swap": 0, "nodes": 1}
+        
+    def _validate_state(self, state: Dict) -> Dict:
+        """Ensure the state dictionary contains all required keys with valid values."""
+        if not isinstance(state, dict):
+            state = {}
+            
+        return {
+            "cpu": float(state.get("cpu", self.DEFAULT_CPU)),
+            "memory": float(state.get("memory", self.DEFAULT_MEMORY_BYTES)),
+            "latency": float(state.get("latency", 0.0)),
+            "swap": float(state.get("swap", 0.0)),
+            "nodes": int(state.get("nodes", self.DEFAULT_NODES)),
+            "pods": int(state.get("pods", self.pods))
+        }

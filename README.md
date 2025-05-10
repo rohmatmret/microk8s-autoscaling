@@ -272,6 +272,18 @@ kubectl create configmap k6-load-script --from-file=load-test/load-test.js
 kubectl apply -f simulation --dry-run=client 
 ```
 
+# MakeFile
+
+1. Start Training Agent
+   
+```
+sudo make  train-simulation AGENT=ppo ENV_MODE=simulate TIMESTEPS=100000 EVAL_EPISODES=100
+```
+
+2. Start Training Agent with DQN
+```
+sudo make  train-simulation AGENT=dqn ENV_MODE=simulate TIMESTEPS=100000 EVAL_EPISODES=100
+```
 
 # Infrastructure Architecture 
 
