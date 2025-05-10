@@ -1,3 +1,9 @@
+"""Mock Kubernetes API implementation for simulating cluster behavior and autoscaling operations.
+
+This module provides a simulated Kubernetes API that mimics real cluster behavior,
+including pod scaling, resource utilization, and traffic-driven metrics.
+"""
+
 import random
 import numpy as np
 from typing import Dict, Any
@@ -21,7 +27,7 @@ class MockKubernetesAPI:
         self.base_latency = 0.2  # Seconds
         self.pod_startup_time = 15  # Steps to become active
         self.failure_rate = 0.05
-        self.scaling_delay = 2
+        self.scaling_delay = 0
         self.current_step = 0
 
         # State history for trend analysis
@@ -51,8 +57,19 @@ class MockKubernetesAPI:
         """Generate realistic cluster state with traffic-driven metrics"""
         self.current_step += 1
         
+        # Calculate traffic-driven metrics
+        current_load = self.traffic_simulator(self.current_step)
+        effective_capacity = max(1, self.active_pods * self.pod_capacity)
+        load_ratio = current_load / effective_capacity
+
+        # Auto-scale based on load ratio
+        if load_ratio > 0.8 and self.current_replicas < self.max_pods:
+            self.current_replicas += 1
+        elif load_ratio < 0.3 and self.current_replicas > 1:
+            self.current_replicas -= 1
+
         # Apply scaling after delay
-        if len(self.scale_buffer) >= self.scaling_delay:
+        if len(self.scale_buffer) > 0 and len(self.scale_buffer) >= self.scaling_delay:
             self.current_replicas = self.scale_buffer.pop(0)
         
         # Simulate gradual pod changes
@@ -60,11 +77,6 @@ class MockKubernetesAPI:
             self.active_pods += min(1, self.current_replicas - self.active_pods)
         elif self.active_pods > self.current_replicas:
             self.active_pods -= min(1, self.active_pods - self.current_replicas)
-
-        # Calculate traffic-driven metrics
-        current_load = self.traffic_simulator(self.current_step)
-        effective_capacity = max(1, self.active_pods * self.pod_capacity)
-        load_ratio = current_load / effective_capacity
         
         # Dynamic resource metrics
         cpu_util = min(1.0, 0.2 + 0.8 * load_ratio + self.random.uniform(-0.05, 0.05))
@@ -94,9 +106,8 @@ class MockKubernetesAPI:
             return False
             
         target = max(1, min(desired_replicas, self.max_pods))
-        
         # Simulate cloud provider rate limiting
-        max_scale_step = 3  # Max pods to add/remove per operation
+        max_scale_step = self.max_pods # 10
         if abs(target - self.current_replicas) > max_scale_step:
             target = self.current_replicas + np.sign(target - self.current_replicas) * max_scale_step
         

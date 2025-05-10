@@ -36,7 +36,7 @@ class MicroK8sEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=np.array([0.0, 0.0, 0.0, 0.0]),
             high=np.array([1.0, 1.0, 1.0, 1.0]),
-            dtype=np.float32
+            dtype=np.float64
         )
 
         # Action: [scale up, scale down, no-op]
@@ -45,18 +45,6 @@ class MicroK8sEnv(gym.Env):
         self.state = None
         logger.info("Initialized MicroK8sEnv for %s in namespace %s", deployment_name, namespace)
 
-    # def reset(self) -> np.ndarray:
-    #     """Reset environment to initial state."""
-    #     try:
-    #         # Set initial pod count to 2
-    #         self.k8s.safe_scale(self.deployment_name, 2)
-    #         time.sleep(self.scaling_delay)
-    #         self.state = self._get_normalized_state()
-    #         logger.info("Environment reset: state=%s", self.state)
-    #         return self.state
-    #     except KubernetesAPIError as e:
-    #         logger.error("Reset failed: %s", e)
-    #         raise
     def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
         """Reset environment to initial state."""
         try:
