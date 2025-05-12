@@ -8,6 +8,20 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList, BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from wandb.integration.sb3 import WandbCallback
+import torch
+from stable_baselines3.dqn import MlpPolicy
+from stable_baselines3.common.vec_env import DummyVecEnv
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+import subprocess
+import signal
+import atexit
+import threading
+from queue import Queue
+import requests
+from prometheus_api_client import PrometheusConnect
+import pandas as pd
+from agent.metrics_callback import AutoscalingMetricsCallback
 
 from agent.environment_simulated import MicroK8sEnvSimulated
 from agent.environment import MicroK8sEnv
@@ -159,20 +173,28 @@ class DQNAgent:
         """Initialize DQN model with exploration tracking."""
         try:
             self.model = DQN(
-                policy="MlpPolicy",
+                policy=MlpPolicy,
                 env=self.env,
-                learning_rate=config.get('learning_rate', 0.0005),
-                buffer_size=config.get('buffer_size', 100000),
-                batch_size=config.get('batch_size', 64),
-                gamma=config.get('gamma', 0.99),
-                tau=0.01,
-                train_freq=4,
-                learning_starts=config.get('learning_starts', 10000),
-                target_update_interval=config.get('target_update_interval', 10000),
-                tensorboard_log=f"{self.model_dir}/tensorboard",
+                learning_rate=config.get('learning_rate', 0.0005),  # Higher learning rate for faster action learning
+                buffer_size=config.get('buffer_size', 100000),      # Larger buffer to remember scaling decisions
+                batch_size=config.get('batch_size', 64),           # Smaller batch for more frequent updates
+                gamma=0.95,                                        # Lower gamma to focus on immediate scaling needs
+                tau=0.01,                                          # Higher tau for faster policy updates
+                train_freq=4,                                      # Train every 4 steps
+                gradient_steps=1,
+                learning_starts=5000,                              # Start learning after collecting some scaling experiences
+                target_update_interval=5000,                       # Update target network more frequently
+                exploration_fraction=0.3,                          # Longer exploration period
+                exploration_initial_eps=1.0,                       # Start with full exploration
+                exploration_final_eps=0.1,                         # Keep some exploration for adapting to traffic changes
+                max_grad_norm=10,
                 verbose=1,
                 seed=config.get('seed', 42),
-                policy_kwargs=dict(net_arch=[64,64])
+                tensorboard_log=f"{self.model_dir}/tensorboard",
+                policy_kwargs=dict(
+                    net_arch=[64, 64],                            # Simpler network for faster learning
+                    activation_fn=torch.nn.ReLU
+                )
             )
              
         except Exception as e:
@@ -207,86 +229,12 @@ class DQNAgent:
 
     def _setup_callbacks(self, eval_episodes: int) -> CallbackList:
         """Configure callbacks with metrics tracking."""
-        class AutoscalingMetricsCallback(BaseCallback):
-            def __init__(self, verbose=0):
-                super().__init__(verbose)
-                self.action_history = []
-                self.episode_count = 0
-
-            def _on_step(self) -> bool:
-                # Log DQN internal metrics every 10 steps
-                if self.n_calls % 10 == 0:
-                    self._log_dqn_metrics()
-                
-                # Track actions for scaling analysis
-                if len(self.locals['actions']) > 0:
-                    self.action_history.extend(self.locals['actions'])
-                
-                return True
-
-            def _on_rollout_end(self) -> None:
-                # Log cluster metrics at the end of each rollout
-                if len(self.locals['infos']) > 0:
-                    self._log_cluster_metrics(self.locals['infos'][0])
-                
-                # Log scaling actions statistics
-                if len(self.action_history) > 0:
-                    self._log_scaling_actions()
-                    self.action_history = []
-                
-                self.episode_count += 1
-
-            def _log_dqn_metrics(self):
-                rewards = getattr(self.model, "replay_buffer", None)
-                q_value_mean = 0
-                if rewards is not None and hasattr(rewards, "rewards"):
-                    q_value_mean = np.mean(rewards.rewards[-1000:]) if len(rewards.rewards) > 0 else 0
-                wandb.log({
-                    "dqn/epsilon": getattr(self.model, "exploration_rate", 0),
-                    "dqn/exploration_steps": getattr(self.model, "num_timesteps", 0),
-                    "dqn/q_value_mean": q_value_mean,
-                }, commit=False)
-
-            def _log_cluster_metrics(self, info: Dict[str, Any]):
-                """Log cluster resource utilization metrics."""
-                if 'cluster_metrics' in info:
-                    metrics = info['cluster_metrics']
-                    wandb.log({
-                        "cluster/cpu_util": metrics.get('actual_cpu', 0),
-                        "cluster/memory_util": metrics.get('actual_memory', 0), 
-                        "cluster/pod_count": metrics.get('actual_pods', 0),
-                        "cluster/latency": metrics.get('latency', 0)
-                    }, commit=False)
-
-            def _log_scaling_actions(self):
-                """Analyze and log scaling action patterns."""
-                actions = np.array(self.action_history)
-                action_counts = {
-                    "scale_down": np.sum(actions == 0),
-                    "no_change": np.sum(actions == 1),
-                    "scale_up": np.sum(actions == 2)
-                }
-                
-                # Create action distribution table
-                action_table = wandb.Table(
-                    columns=["Action", "Count"],
-                    data=[
-                        ["Scale Down", action_counts["scale_down"]],
-                        ["No Change", action_counts["no_change"]],
-                        ["Scale Up", action_counts["scale_up"]]
-                    ]
-                )
-                
-                wandb.log({
-                    "actions/scale_up": action_counts["scale_up"],
-                    "actions/no_change": action_counts["no_change"],
-                    "actions/scale_down": action_counts["scale_down"],
-                    "actions/mean_action": np.mean(actions),
-                    "eval_summary/action_distribution": wandb.plot.bar(
-                        action_table, "Action", "Count",
-                        title="Action Distribution"
-                    )
-                }, commit=False)
+        metrics_callback = AutoscalingMetricsCallback(
+            prometheus_url="http://localhost:9090",
+            algorithm="dqn",
+            verbose=1,
+            is_simulated=self.is_simulated
+        )
 
         return CallbackList([
             CheckpointCallback(
@@ -307,7 +255,7 @@ class DQNAgent:
                 verbose=2,
                 log="all"
             ),
-            AutoscalingMetricsCallback(),
+            metrics_callback,
             VisualizationCallback()
         ])
 
@@ -367,13 +315,6 @@ class DQNAgent:
                     cluster_metrics['pods'].append(custom_metrics.get('pod_count', 0))
                     cluster_metrics['latency'].append(custom_metrics.get('latency', 0))
                     cluster_metrics['swap'].append(custom_metrics.get('swap_usage', 0))
-
-                    # cluster_metrics = current_info.get('cluster_metrics', {})
-                    # cluster_metrics['cpu'].append(cluster_metrics.get('cpu_utilization', 0))
-                    # cluster_metrics['memory'].append(cluster_metrics.get('memory_utilization', 0))
-                    # cluster_metrics['pods'].append(cluster_metrics.get('pod_count', 0))
-                    # cluster_metrics['latency'].append(cluster_metrics.get('latency', 0))
-                    # cluster_metrics['swap'].append(cluster_metrics.get('swap_usage', 0))
 
                 # Log episode reward after episode completes
                 rewards.append(episode_reward)
@@ -461,8 +402,10 @@ def main():
     try:
         parser = argparse.ArgumentParser(description='MicroK8s DQN Autoscaler')
         parser.add_argument('--simulate', action='store_true', help='Use simulated environment')
-        parser.add_argument('--timesteps', type=int, default=50000, help='Training timesteps')
-        parser.add_argument('--eval-episodes', type=int, default=100, help='Evaluation episodes')
+        parser.add_argument('--timesteps', type=int, default=200000, help='Training timesteps')
+        parser.add_argument('--eval-episodes', type=int, default=20, help='Evaluation episodes')
+        parser.add_argument('--learning-rate', type=float, default=0.0005, help='Learning rate')
+        parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
         args = parser.parse_args()
 
         # Instantiate environments separately for training and evaluation
@@ -471,15 +414,22 @@ def main():
         else:
             env = MicroK8sEnv()
 
-        # Initialize agent with both environments
-        agent = DQNAgent(env=env, environment=env, is_simulated=args.simulate)
+        # Initialize agent with both environments and custom parameters
+        agent = DQNAgent(
+            env=env, 
+            environment=env, 
+            is_simulated=args.simulate,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size
+        )
 
-        # Train and evaluate
+        # Train with more episodes for better scaling policy learning
         agent.train(
             total_timesteps=args.timesteps,
             eval_episodes=args.eval_episodes
         )
 
+        # Evaluate with more episodes to ensure stable scaling
         agent.evaluate(episodes=args.eval_episodes)
 
     except Exception as e:
