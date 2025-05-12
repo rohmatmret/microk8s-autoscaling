@@ -14,6 +14,13 @@ from agent.environment_simulated import MicroK8sEnvSimulated
 from agent.system_callback_metrics import SystemMetricsCallback
 from agent.traffic_simulation import TrafficSimulator
 import torch as th
+import sys
+import gym
+from gym import spaces
+import time
+from kubernetes import client, config
+from prometheus_api_client import PrometheusConnect
+from .metrics_callback import AutoscalingMetricsCallback
 
 # Configure logging
 logging.basicConfig(
@@ -398,9 +405,185 @@ class PPOAgent:
         self.model = PPO.load(path, env=self.env)
         logger.info("Model loaded from %s", path)
 
-      
-      
+class K8sEnv(gym.Env):
+    """Kubernetes environment for PPO training."""
+    
+    def __init__(self):
+        super().__init__()
         
+        # Define action space (scale up, no change, scale down)
+        self.action_space = spaces.Discrete(3)
+        
+        # Define observation space
+        self.observation_space = spaces.Box(
+            low=np.array([0, 0, 0, 0]),  # [cpu_util, memory_util, pod_count, latency]
+            high=np.array([100, 100, 10, 1000]),
+            dtype=np.float32
+        )
+        
+        # Initialize Kubernetes client
+        try:
+            config.load_kube_config()
+            self.k8s_api = client.AppsV1Api()
+            self.core_api = client.CoreV1Api()
+        except Exception as e:
+            logger.error(f"Failed to initialize Kubernetes client: {e}")
+            raise
+        
+        # Initialize Prometheus client
+        self.prom = PrometheusConnect(url="http://localhost:9090")
+        
+        # Set deployment name
+        self.deployment_name = "nginx-deployment"
+        self.namespace = "default"
+        
+        # Initialize state
+        self.current_pods = 1
+        self.max_pods = 10
+        self.min_pods = 1
+        
+    def reset(self):
+        """Reset environment to initial state."""
+        # Reset deployment to initial state
+        try:
+            self.k8s_api.patch_namespaced_deployment(
+                name=self.deployment_name,
+                namespace=self.namespace,
+                body={"spec": {"replicas": self.min_pods}}
+            )
+            self.current_pods = self.min_pods
+        except Exception as e:
+            logger.error(f"Failed to reset deployment: {e}")
+        
+        # Wait for pods to be ready
+        time.sleep(5)
+        
+        # Get initial state
+        return self._get_state()
+    
+    def step(self, action):
+        """Execute one step in the environment."""
+        # Map action to pod count change
+        if action == 0:  # Scale down
+            new_pods = max(self.current_pods - 1, self.min_pods)
+        elif action == 1:  # No change
+            new_pods = self.current_pods
+        else:  # Scale up
+            new_pods = min(self.current_pods + 1, self.max_pods)
+        
+        # Update deployment
+        try:
+            self.k8s_api.patch_namespaced_deployment(
+                name=self.deployment_name,
+                namespace=self.namespace,
+                body={"spec": {"replicas": new_pods}}
+            )
+            self.current_pods = new_pods
+        except Exception as e:
+            logger.error(f"Failed to update deployment: {e}")
+        
+        # Wait for scaling to take effect
+        time.sleep(5)
+        
+        # Get new state
+        state = self._get_state()
+        
+        # Calculate reward
+        reward = self._calculate_reward(state)
+        
+        # Check if episode is done
+        done = False
+        
+        # Additional info
+        info = {
+            'cluster_metrics': {
+                'cpu_utilization': state[0],
+                'memory_utilization': state[1],
+                'pod_count': state[2],
+                'latency': state[3]
+            }
+        }
+        
+        return state, reward, done, info
+    
+    def _get_state(self):
+        """Get current state from Prometheus metrics."""
+        try:
+            # Get CPU utilization
+            cpu_query = 'rate(container_cpu_usage_seconds_total[1m])'
+            cpu_response = self.prom.custom_query(cpu_query)
+            cpu_util = float(cpu_response[0]['value'][1]) * 100
+            
+            # Get memory utilization
+            memory_query = 'container_memory_usage_bytes'
+            memory_response = self.prom.custom_query(memory_query)
+            memory_util = float(memory_response[0]['value'][1]) / 1e9 * 100  # Convert to GB and percentage
+            
+            # Get latency
+            latency_query = 'rate(http_request_duration_seconds_sum[1m])/rate(http_request_duration_seconds_count[1m])'
+            latency_response = self.prom.custom_query(latency_query)
+            latency = float(latency_response[0]['value'][1]) * 1000  # Convert to ms
+            
+            return np.array([cpu_util, memory_util, self.current_pods, latency], dtype=np.float32)
+            
+        except Exception as e:
+            logger.error(f"Failed to get state from Prometheus: {e}")
+            return np.zeros(4, dtype=np.float32)
+    
+    def _calculate_reward(self, state):
+        """Calculate reward based on current state."""
+        cpu_util, memory_util, pod_count, latency = state
+        
+        # Target metrics
+        target_cpu = 70
+        target_memory = 70
+        target_latency = 100  # ms
+        
+        # Calculate individual rewards
+        cpu_reward = -abs(cpu_util - target_cpu) / 100
+        memory_reward = -abs(memory_util - target_memory) / 100
+        latency_reward = -abs(latency - target_latency) / 1000
+        
+        # Penalize too many pods
+        pod_penalty = -0.1 * (pod_count - 1)
+        
+        # Combine rewards
+        total_reward = cpu_reward + memory_reward + latency_reward + pod_penalty
+        
+        return total_reward
+
+class K8sSimulationEnv(K8sEnv):
+    """Simulated Kubernetes environment for faster training."""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Simulated metrics
+        self.cpu_util = 50
+        self.memory_util = 50
+        self.latency = 100
+        
+        # Traffic pattern
+        self.time_step = 0
+        self.base_load = 100
+        self.max_spike = 1000
+        self.spike_probability = 0.1
+    
+    def _get_state(self):
+        """Get simulated state."""
+        # Simulate traffic pattern
+        if np.random.random() < self.spike_probability:
+            self.cpu_util = min(100, self.cpu_util + np.random.randint(10, 30))
+            self.memory_util = min(100, self.memory_util + np.random.randint(5, 15))
+            self.latency = min(1000, self.latency + np.random.randint(50, 200))
+        else:
+            self.cpu_util = max(0, self.cpu_util - np.random.randint(5, 15))
+            self.memory_util = max(0, self.memory_util - np.random.randint(2, 8))
+            self.latency = max(0, self.latency - np.random.randint(20, 100))
+        
+        self.time_step += 1
+        return np.array([self.cpu_util, self.memory_util, self.current_pods, self.latency], dtype=np.float32)
+
 def parse_args():
     """Parse command-line arguments."""
 
@@ -415,8 +598,6 @@ def parse_args():
         parsed_args.eval_episodes = 100
     
     return parsed_args
-
-
 
 if __name__ == "__main__":
     args = parse_args()

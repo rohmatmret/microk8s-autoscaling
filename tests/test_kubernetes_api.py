@@ -10,18 +10,22 @@ def mock_api():
          patch('kubernetes.client.AppsV1Api'), \
          patch('kubernetes.client.CoreV1Api'), \
          patch('prometheus_api_client.PrometheusConnect'):
-        api = KubernetesAPI(max_pods=5, max_nodes=3)
+        api = KubernetesAPI(max_pods=10, max_nodes=3)
         api.apps_api = MagicMock()
         api.core_api = MagicMock()
         api.prometheus = MagicMock()
         yield api
 
 def test_get_cluster_state_success(mock_api):
-    mock_api._get_pod_count = MagicMock(return_value=3)
-    mock_api._get_node_count = MagicMock(return_value=2)
-    mock_api._get_cpu_usage = MagicMock(return_value=75.0)
-    mock_api._get_memory_usage = MagicMock(return_value=2e9)  # 2GB
-    mock_api._get_latency = MagicMock(return_value=0.15)
+    """Test that the cluster state is returned correctly."""
+    # Mock the underlying API responses
+    mock_api.core_api.list_namespaced_pod.return_value.items = [MagicMock()] * 3
+    mock_api.core_api.list_node.return_value.items = [MagicMock()] * 2
+    mock_api.prometheus.custom_query.side_effect = [
+        [{"value": ["", "75.0"]}],  # CPU query
+        [{"value": ["", "2000000000"]}],  # Memory query
+        [{"value": ["", "0.15"]}]  # Latency query
+    ]
     
     state = mock_api.get_cluster_state()
     assert state == {
