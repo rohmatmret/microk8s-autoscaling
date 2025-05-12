@@ -20,7 +20,7 @@ from gym import spaces
 import time
 from kubernetes import client, config
 from prometheus_api_client import PrometheusConnect
-from .metrics_callback import AutoscalingMetricsCallback
+from agent.metrics_callback import AutoscalingMetricsCallback
 
 # Configure logging
 logging.basicConfig(
