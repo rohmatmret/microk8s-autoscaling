@@ -133,7 +133,14 @@ class PPOAgent:
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
 
-        # Initialize wandb
+        self._initialize_wandb(learning_rate, gamma, n_steps, batch_size)
+        self._initialize_evaluation_environment()
+        self._initialize_model(learning_rate, n_steps, batch_size, gamma)
+
+        logger.info("Initialized PPO with learning_rate=%.4f, gamma=%.2f", learning_rate, gamma)
+
+    def _initialize_wandb(self, learning_rate: float, gamma: float, n_steps: int, batch_size: int):
+        """Initializes Weights & Biases for experiment tracking."""
         wandb.init(
             project="microk8s_rl_autoscaling",
             resume="allow",
@@ -174,8 +181,10 @@ class PPOAgent:
             }
         })
         wandb.Settings(init_timeout=180)
+        logger.info("Weights & Biases initialized.")
 
-        # Create evaluation environment with higher base load
+    def _initialize_evaluation_environment(self):
+        """Initializes the evaluation environment."""
         self.eval_env = make_vec_env(
             lambda: MicroK8sEnvSimulated(),
             n_envs=1
@@ -183,12 +192,17 @@ class PPOAgent:
         
         # Update traffic simulator parameters for evaluation
         for env in self.eval_env.envs:
-            env.env.traffic_simulator.base_load = 150
-            env.env.traffic_simulator.max_spike = 50
-            env.env.traffic_simulator.daily_amplitude = 0.5
-            env.env.traffic_simulator.spike_probability = 0.01
+            if hasattr(env, 'env') and hasattr(env.env, 'traffic_simulator'):
+                env.env.traffic_simulator.base_load = 150
+                env.env.traffic_simulator.max_spike = 50
+                env.env.traffic_simulator.daily_amplitude = 0.5
+                env.env.traffic_simulator.spike_probability = 0.01
+            else:
+                logger.warning("Evaluation environment or its traffic_simulator not found as expected.")
+        logger.info("Evaluation environment initialized.")
 
-        # Initialize PPO model
+    def _initialize_model(self, learning_rate: float, n_steps: int, batch_size: int, gamma: float):
+        """Initializes the PPO model."""
         self.model = PPO(
             policy="MlpPolicy",
             env=self.env,
@@ -205,9 +219,8 @@ class PPOAgent:
             policy_kwargs=dict(net_arch=[64,64]),
             seed=42,
             device="cuda"  # ✅ Gunakan GPU
-
         )
-        logger.info("Initialized PPO with learning_rate=%.4f, gamma=%.2f", learning_rate, gamma)
+        logger.info("PPO model initialized.")
 
     def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000, 
         eval_episodes=10) -> None:
@@ -404,185 +417,6 @@ class PPOAgent:
         path = path or f"{self.model_dir}/ppo_final"
         self.model = PPO.load(path, env=self.env)
         logger.info("Model loaded from %s", path)
-
-class K8sEnv(gym.Env):
-    """Kubernetes environment for PPO training."""
-    
-    def __init__(self):
-        super().__init__()
-        
-        # Define action space (scale up, no change, scale down)
-        self.action_space = spaces.Discrete(3)
-        
-        # Define observation space
-        self.observation_space = spaces.Box(
-            low=np.array([0, 0, 0, 0]),  # [cpu_util, memory_util, pod_count, latency]
-            high=np.array([100, 100, 10, 1000]),
-            dtype=np.float32
-        )
-        
-        # Initialize Kubernetes client
-        try:
-            config.load_kube_config()
-            self.k8s_api = client.AppsV1Api()
-            self.core_api = client.CoreV1Api()
-        except Exception as e:
-            logger.error(f"Failed to initialize Kubernetes client: {e}")
-            raise
-        
-        # Initialize Prometheus client
-        self.prom = PrometheusConnect(url="http://localhost:9090")
-        
-        # Set deployment name
-        self.deployment_name = "nginx-deployment"
-        self.namespace = "default"
-        
-        # Initialize state
-        self.current_pods = 1
-        self.max_pods = 10
-        self.min_pods = 1
-        
-    def reset(self):
-        """Reset environment to initial state."""
-        # Reset deployment to initial state
-        try:
-            self.k8s_api.patch_namespaced_deployment(
-                name=self.deployment_name,
-                namespace=self.namespace,
-                body={"spec": {"replicas": self.min_pods}}
-            )
-            self.current_pods = self.min_pods
-        except Exception as e:
-            logger.error(f"Failed to reset deployment: {e}")
-        
-        # Wait for pods to be ready
-        time.sleep(5)
-        
-        # Get initial state
-        return self._get_state()
-    
-    def step(self, action):
-        """Execute one step in the environment."""
-        # Map action to pod count change
-        if action == 0:  # Scale down
-            new_pods = max(self.current_pods - 1, self.min_pods)
-        elif action == 1:  # No change
-            new_pods = self.current_pods
-        else:  # Scale up
-            new_pods = min(self.current_pods + 1, self.max_pods)
-        
-        # Update deployment
-        try:
-            self.k8s_api.patch_namespaced_deployment(
-                name=self.deployment_name,
-                namespace=self.namespace,
-                body={"spec": {"replicas": new_pods}}
-            )
-            self.current_pods = new_pods
-        except Exception as e:
-            logger.error(f"Failed to update deployment: {e}")
-        
-        # Wait for scaling to take effect
-        time.sleep(5)
-        
-        # Get new state
-        state = self._get_state()
-        
-        # Calculate reward
-        reward = self._calculate_reward(state)
-        
-        # Check if episode is done
-        done = False
-        
-        # Additional info
-        info = {
-            'cluster_metrics': {
-                'cpu_utilization': state[0],
-                'memory_utilization': state[1],
-                'pod_count': state[2],
-                'latency': state[3]
-            }
-        }
-        
-        return state, reward, done, info
-    
-    def _get_state(self):
-        """Get current state from Prometheus metrics."""
-        try:
-            # Get CPU utilization
-            cpu_query = 'rate(container_cpu_usage_seconds_total[1m])'
-            cpu_response = self.prom.custom_query(cpu_query)
-            cpu_util = float(cpu_response[0]['value'][1]) * 100
-            
-            # Get memory utilization
-            memory_query = 'container_memory_usage_bytes'
-            memory_response = self.prom.custom_query(memory_query)
-            memory_util = float(memory_response[0]['value'][1]) / 1e9 * 100  # Convert to GB and percentage
-            
-            # Get latency
-            latency_query = 'rate(http_request_duration_seconds_sum[1m])/rate(http_request_duration_seconds_count[1m])'
-            latency_response = self.prom.custom_query(latency_query)
-            latency = float(latency_response[0]['value'][1]) * 1000  # Convert to ms
-            
-            return np.array([cpu_util, memory_util, self.current_pods, latency], dtype=np.float32)
-            
-        except Exception as e:
-            logger.error(f"Failed to get state from Prometheus: {e}")
-            return np.zeros(4, dtype=np.float32)
-    
-    def _calculate_reward(self, state):
-        """Calculate reward based on current state."""
-        cpu_util, memory_util, pod_count, latency = state
-        
-        # Target metrics
-        target_cpu = 70
-        target_memory = 70
-        target_latency = 100  # ms
-        
-        # Calculate individual rewards
-        cpu_reward = -abs(cpu_util - target_cpu) / 100
-        memory_reward = -abs(memory_util - target_memory) / 100
-        latency_reward = -abs(latency - target_latency) / 1000
-        
-        # Penalize too many pods
-        pod_penalty = -0.1 * (pod_count - 1)
-        
-        # Combine rewards
-        total_reward = cpu_reward + memory_reward + latency_reward + pod_penalty
-        
-        return total_reward
-
-class K8sSimulationEnv(K8sEnv):
-    """Simulated Kubernetes environment for faster training."""
-    
-    def __init__(self):
-        super().__init__()
-        
-        # Simulated metrics
-        self.cpu_util = 50
-        self.memory_util = 50
-        self.latency = 100
-        
-        # Traffic pattern
-        self.time_step = 0
-        self.base_load = 100
-        self.max_spike = 1000
-        self.spike_probability = 0.1
-    
-    def _get_state(self):
-        """Get simulated state."""
-        # Simulate traffic pattern
-        if np.random.random() < self.spike_probability:
-            self.cpu_util = min(100, self.cpu_util + np.random.randint(10, 30))
-            self.memory_util = min(100, self.memory_util + np.random.randint(5, 15))
-            self.latency = min(1000, self.latency + np.random.randint(50, 200))
-        else:
-            self.cpu_util = max(0, self.cpu_util - np.random.randint(5, 15))
-            self.memory_util = max(0, self.memory_util - np.random.randint(2, 8))
-            self.latency = max(0, self.latency - np.random.randint(20, 100))
-        
-        self.time_step += 1
-        return np.array([self.cpu_util, self.memory_util, self.current_pods, self.latency], dtype=np.float32)
 
 def parse_args():
     """Parse command-line arguments."""

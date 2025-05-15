@@ -22,7 +22,7 @@ class MicroK8sEnvSimulated(gym.Env):
     """Simulated MicroK8s environment for autoscaling with Gymnasium compatibility."""
     MIN_HISTORY_LENGTH = 5  # Minimum number of load history entries required
     MAX_HISTORY_LENGTH = 1000  # Maximum history size
-    DEFAULT_CPU = 0.4
+    DEFAULT_CPU = 0.3
     DEFAULT_MEMORY = 0.3
     DEFAULT_MEMORY_BYTES = DEFAULT_MEMORY * 500e6
     DEFAULT_NODES = 1
@@ -30,15 +30,7 @@ class MicroK8sEnvSimulated(gym.Env):
 
     def __init__(self, seed=None, enable_visualization=True):
         super().__init__()
-        # self.traffic_simulator = HybridTrafficSimulator(
-        #     base_load=100,
-        #     seed=seed,
-        #     event_frequency=0.005,
-        #     min_intensity=5,
-        #     max_intensity=50,
-        #     min_duration=10,
-        #     max_duration=200
-        # )
+       
         self.traffic_simulator = TrafficSimulator(
             base_load=100,
             max_spike=30,
@@ -325,75 +317,100 @@ class MicroK8sEnvSimulated(gym.Env):
         load_mean = np.mean(self.load_history) / 5000
         load_gradient = self._calculate_load_gradient()
         
-        # 1. Core Resource Efficiency (30%)
-        # More balanced CPU reward
-        cpu_reward = 0.0
-        if cpu < 0.3:  # Low utilization
-            cpu_reward = -0.1 * (0.3 - cpu)  # Reduced penalty for low utilization
-        elif 0.3 <= cpu <= 0.8:  # Good utilization range
-            cpu_reward = 0.15
-        else:  # High utilization
-            cpu_reward = -0.2 * (cpu - 0.8)  # Keep strong penalty for high utilization
-            
-        mem_reward = (1.0 if 0.3 <= memory <= 0.7 else -abs(memory - 0.5)) * 0.15
-        
-        # 2. Pod Utilization Efficiency (30%)
-        # Calculate ideal pod count with more balanced approach
-        load_based_pods = min(max_pods, max(1, round(load_mean * max_pods * 1.1)))  # 10% headroom
+        # Calculate ideal pods first - this will be used throughout
+        load_based_pods = min(max_pods, max(1, round(load_mean * max_pods * 1.2)))  # 20% headroom
         resource_based_pods = max(1, min(max_pods, 
-            round(max(cpu / 0.6, memory / 0.5))))
-        ideal_pods = max(load_based_pods, resource_based_pods)  # Changed to max for more conservative scaling
+            round(max(cpu / 0.6, memory / 0.6))))  # Moderate thresholds
+        ideal_pods = max(load_based_pods, resource_based_pods)
+        pod_diff = ideal_pods - pods
         
-        # More balanced pod utilization reward
-        pod_utilization = 0.0
+        # Base reward starts negative to encourage action
+        total_reward = -0.1
+        
+        # 1. Resource Utilization (40%)
+        # CPU utilization reward
+        if cpu < 0.3:  # Low utilization
+            if action == 2 and pods > 1:  # Reward scale down
+                total_reward += 0.4
+            elif action == 0 and pods > 1:  # Penalize no action
+                total_reward -= 0.2
+        elif 0.3 <= cpu <= 0.7:  # Optimal range
+            total_reward += 0.3
+        elif 0.7 < cpu <= 0.85:  # Warning zone
+            if action == 1:  # Reward scale up
+                total_reward += 0.3
+            elif action == 0:  # Penalize no action
+                total_reward -= 0.2
+        else:  # High utilization
+            if action == 1:  # Strongly reward scale up
+                total_reward += 0.4
+            else:  # Strongly penalize not scaling up
+                total_reward -= 0.4
+                
+        # Memory utilization reward
+        if memory < 0.3 and pods > 1:
+            if action == 2:  # Reward scale down
+                total_reward += 0.3
+            elif action == 0:  # Small penalty for no action
+                total_reward -= 0.1
+        elif memory > 0.8:
+            if action == 1:  # Reward scale up
+                total_reward += 0.3
+            elif action == 0:  # Penalize no action
+                total_reward -= 0.2
+                
+        # 2. Pod Alignment Reward (30%)
         if pods == ideal_pods:
-            pod_utilization = 0.3  # Maximum reward for perfect match
-        else:
-            # More balanced penalty for deviation
-            pod_utilization = -0.3 * (abs(pods - ideal_pods) / max_pods)
+            total_reward += 0.3
+        elif pod_diff > 0:  # Need more pods
+            if action == 1:  # Reward scale up
+                total_reward += 0.3
+            elif action == 0:  # Penalize no action
+                total_reward -= 0.2
+        else:  # Too many pods
+            if cpu < 0.4 and memory < 0.4:  # Only if resources are low
+                if action == 2:  # Reward scale down
+                    total_reward += 0.3
+                elif action == 0 and pods > 1:  # Penalize no action
+                    total_reward -= 0.2
+                    
+        # 3. Load Response (30%)
+        if abs(load_gradient) > 0.008:
+            if load_gradient > 0.008:  # Load increasing
+                if cpu > 0.6 or memory > 0.6:  # Only if resources are getting high
+                    if action == 1:
+                        total_reward += 0.3
+                    elif action == 0:
+                        total_reward -= 0.2
+            elif load_gradient < -0.008:  # Load decreasing
+                if cpu < 0.4 and memory < 0.4 and pods > 1:  # Only if resources are low
+                    if action == 2:
+                        total_reward += 0.3
+                    elif action == 0:
+                        total_reward -= 0.1
         
-        # 3. Scaling Effectiveness (20%)
-        scaling_efficiency = 0.0
-        if action != 0:  # Only evaluate if scaling action was taken
-            # More balanced scaling rewards
-            if pods > ideal_pods and action == 2:  # Correct scale-down
-                scaling_efficiency = 0.15  # Reduced reward for scale-down
-            elif pods < ideal_pods and action == 1:  # Correct scale-up
-                scaling_efficiency = 0.2  # Keep higher reward for scale-up
-            else:  # Incorrect scaling direction
-                scaling_efficiency = -0.1
+        # Critical condition penalties
+        if cpu > 0.9 or memory > 0.9:
+            total_reward -= 0.5
+            if action != 1:  # Extra penalty for not scaling up
+                total_reward -= 0.3
         
-        # 4. Load Pattern Response (20%)
-        load_response = 0.0
-        if abs(load_gradient) > 0.01:  # Significant trend
-            if load_gradient > 0.01 and action == 1:  # Scale up for increasing load
-                load_response = 0.2 if cpu < 0.8 else -0.1
-            elif load_gradient < -0.01 and action == 2:  # Scale down for decreasing load
-                load_response = 0.15 if cpu < 0.3 else -0.1  # Reduced reward for scale-down
-            elif abs(load_gradient) < 0.005 and action == 0:  # No change for stable load
-                load_response = 0.1
+        # Swap penalty
+        if swap > 0.1:
+            total_reward -= swap * 0.4
         
-        # 5. Stability Penalties
-        swap_penalty = -swap * 0.1
-        scaling_cost = -0.02 if action != 0 else 0
-        
-        # Combine all components
-        total_reward = (
-            cpu_reward +
-            mem_reward +
-            pod_utilization +
-            scaling_efficiency +
-            load_response +
-            swap_penalty +
-            scaling_cost
-        )
+        # Scaling cost - smaller for scale down than up
+        if action == 1:  # Scale up
+            total_reward -= 0.05
+        elif action == 2:  # Scale down
+            total_reward -= 0.02  # Lower penalty for scaling down
         
         # Clip final reward
         total_reward = float(np.clip(total_reward, -1.0, 1.0))
         
         logger.debug(
-            "Reward components - CPU: %.2f, Mem: %.2f, Pods: %.2f, Scaling: %.2f, Load: %.2f",
-            cpu_reward, mem_reward, pod_utilization, scaling_efficiency, load_response
+            "Step info - CPU: %.2f, Memory: %.2f, Pods: %d, Ideal: %d, Action: %d, Reward: %.2f",
+            cpu, memory, pods, ideal_pods, action, total_reward
         )
         
         return total_reward
