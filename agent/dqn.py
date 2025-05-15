@@ -194,7 +194,8 @@ class DQNAgent:
                 policy_kwargs=dict(
                     net_arch=[64, 64],                            # Simpler network for faster learning
                     activation_fn=torch.nn.ReLU
-                )
+                ),
+                device="cuda"
             )
              
         except Exception as e:

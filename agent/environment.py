@@ -98,32 +98,58 @@ class MicroK8sEnv(gym.Env):
     def _calculate_reward(self, prev_state: np.ndarray, new_state: np.ndarray) -> float:
         """Calculate reward based on state transition."""
         cpu, memory, latency, swap, pods = new_state
-        reward = (
-            -latency * 0.5     # User experience utama
-            -cpu * 0.2         # Beban sistem
-            -memory * 0.15
-            -swap * 0.1        # Swap = tekanan RAM
-            -pods * 0.05       # Biaya infrastruktur
-        )
+        # reward = (
+        #     -latency * 0.5     # User experience utama
+        #     -cpu * 0.2         # Beban sistem
+        #     -memory * 0.15
+        #     -swap * 0.1        # Swap = tekanan RAM
+        #     -pods * 0.05       # Biaya infrastruktur
+        # )
 
-        # --- Penalti tambahan untuk outlier atau kondisi tidak optimal ---
-        if latency > 0.8:
-            reward -= 2.0
-        if cpu > 0.9:
-            reward -= 1.5
-        if swap > 0.5:
-            reward -= 1.0
-        if pods > 0.85:
-            reward -= 1.0
+        # # --- Penalti tambahan untuk outlier atau kondisi tidak optimal ---
+        # if latency > 0.8:
+        #     reward -= 2.0
+        # if cpu > 0.9:
+        #     reward -= 1.5
+        # if swap > 0.5:
+        #     reward -= 1.0
+        # if pods > 0.85:
+        #     reward -= 1.0
 
 
-        # --- Penalti untuk scaling yang tidak efektif ---
-        if prev_state[4] < new_state[4]:  # jumlah pods naik
-            if abs(prev_state[2] - new_state[2]) < 0.05:  # latency tidak turun signifikan
-                reward -= 1.0
+        # # --- Penalti untuk scaling yang tidak efektif ---
+        # if prev_state[4] < new_state[4]:  # jumlah pods naik
+        #     if abs(prev_state[2] - new_state[2]) < 0.05:  # latency tidak turun signifikan
+        #         reward -= 1.0
                 
-        if latency < 0.3 and cpu < 0.5:
+        # if latency < 0.3 and cpu < 0.5:
+        #     reward += 1.0
+
+    # Target: latency < 0.3, cpu < 0.7, pods tidak boros
+        reward = 0.0
+
+    # Reward performa baik
+        if latency < 0.3:
             reward += 1.0
+        elif latency < 0.6:
+            reward += 0.5
+        else:
+            reward -= 1.0
+
+        # Penalti CPU tinggi
+        if cpu > 0.85:
+            reward -= 0.7
+        elif cpu > 0.7:
+            reward -= 0.4
+
+        # Penalti penggunaan pods berlebih
+        if pods > 0.8:
+            reward -= 0.5
+
+        # Insentif jika scaling down benar-benar membantu
+        if prev_state[3] > new_state[3]:  # pods berkurang
+            if cpu < prev_state[0] and latency < prev_state[2]:
+                reward += 0.5
                 
         return reward
 

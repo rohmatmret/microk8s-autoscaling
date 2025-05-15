@@ -16,7 +16,7 @@ import json
 import time
 import pandas as pd
 from agent.metrics_callback import AutoscalingMetricsCallback
-from agent.ppo import K8sSimulationEnv
+from agent.environment_simulated import MicroK8sEnvSimulated
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -110,10 +110,34 @@ def train_and_evaluate(algorithm, env, timesteps, learning_rate, batch_size, is_
     model.save(f"{algorithm}_k8s_autoscaler")
     wandb.save(f"{algorithm}_k8s_autoscaler.zip")
     
+    # Fetch training rewards before finishing the run
+    training_rewards = []
+    if wandb.run is not None:
+        history_df = wandb.run.history(keys=["train/episode_reward"], pandas=True)
+        if "train/episode_reward" in history_df.columns:
+            training_rewards = history_df["train/episode_reward"].tolist()
+        else:
+            # Try to find other common reward keys if the primary one is missing
+            possible_keys = ["rollout/ep_rew_mean", "ep_reward_mean", "episode_reward"]
+            found_key = None
+            for key in possible_keys:
+                if key in history_df.columns:
+                    training_rewards = history_df[key].tolist()
+                    logger.info(f"Using '{key}' for training rewards for run {wandb.run.id} as 'train/episode_reward' was not found.")
+                    found_key = True
+                    break
+            if not found_key:
+                logger.warning(
+                    f"Metric 'train/episode_reward' (and common alternatives) not found in wandb history for run {wandb.run.id}. "
+                    f"Available keys: {history_df.columns.tolist()}"
+                )
+    else:
+        logger.warning("WandB run was not active when trying to fetch history in train_and_evaluate.")
+    
     # Close WandB
     wandb.finish()
     
-    return mean_reward, std_reward
+    return mean_reward, std_reward, training_rewards
 
 def plot_comparison(dqn_rewards, ppo_rewards, save_path="algorithm_comparison.png"):
     """Plot comparison of algorithm performance."""
@@ -154,13 +178,13 @@ def main():
     args = parser.parse_args()
     
     # Create environment
-    env = K8sSimulationEnv()
+    env = MicroK8sEnvSimulated()
     env = Monitor(env)
     env = DummyVecEnv([lambda: env])
     
     # Train and evaluate DQN
     logger.info("Training DQN...")
-    dqn_mean, dqn_std = train_and_evaluate(
+    dqn_mean, dqn_std, dqn_training_rewards = train_and_evaluate(
         "dqn",
         env,
         args.timesteps,
@@ -172,7 +196,7 @@ def main():
     
     # Train and evaluate PPO
     logger.info("Training PPO...")
-    ppo_mean, ppo_std = train_and_evaluate(
+    ppo_mean, ppo_std, ppo_training_rewards = train_and_evaluate(
         "ppo",
         env,
         args.timesteps,
@@ -182,12 +206,12 @@ def main():
     )
     logger.info(f"PPO - Mean reward: {ppo_mean:.2f} +/- {ppo_std:.2f}")
     
-    # Load training rewards from WandB
-    dqn_rewards = wandb.run.history()["train/episode_reward"].tolist()
-    ppo_rewards = wandb.run.history()["train/episode_reward"].tolist()
+    # Training rewards are now returned directly from train_and_evaluate
+    # dqn_rewards = wandb.run.history()["train/episode_reward"].tolist() # This was causing the error
+    # ppo_rewards = wandb.run.history()["train/episode_reward"].tolist() # This was causing the error
     
     # Plot comparison
-    plot_comparison(dqn_rewards, ppo_rewards)
+    plot_comparison(dqn_training_rewards, ppo_training_rewards)
     
     # Print summary
     logger.info("\nAlgorithm Comparison Summary:")
