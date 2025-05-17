@@ -165,6 +165,7 @@ kubectl get nodes
 ```
 
 
+
 ## Project Structure
 ```plaintext
 microk8s-rl-autoscaling/  
@@ -193,7 +194,11 @@ microk8s-rl-autoscaling/
 |- Makefile                    # Build automation (opsional)
 └── LICENSE                     # Lisensi proyek
 ```
+----
+# Tutorial
+## Read more Code Base [Here](index.md)
 
+----
 
 ## Solution Manually Install Grafana (If Addon is Missing)
 If Grafana is still not available as an addon, you can deploy it manually using Helm or YAML.
