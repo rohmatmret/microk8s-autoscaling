@@ -7,6 +7,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList,BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.utils import get_linear_fn
 import wandb
 from wandb.integration.sb3 import WandbCallback
 from agent.environment import MicroK8sEnv
@@ -148,7 +149,7 @@ class PPOAgent:
                 "algorithm": "PPO",
                 "environment": ENV_NAME,
                 "reward_shaping": True,
-                "learning_rate": learning_rate,
+                "learning_rate": get_linear_fn(learning_rate, 0.0001, 1.0),  # Jadwal untuk stabilitas
                 "gamma": gamma,
                 "gae_lambda": 0.95,
                 "n_steps": n_steps,
@@ -157,10 +158,18 @@ class PPOAgent:
                 "normalize_advantage": True,
                 "clip_range": 0.2,
                 "vf_coef": 0.5,
+                "ent_coef": 0.03,  # Eksplorasi seimbang
                 "policy": "MlpPolicy",
+                "max_grad_norm": 0.5,
+                "policy_kwargs": dict(net_arch=[64,64]),
+                "seed": 42,
+                "device": "auto",
+                "optimize_memory_usage": False,
+                "verbose": 1,
             },
             tensorboard=True,
             tags=["PPO", "autoscaling", "reward shaping", ENV_NAME],
+            mode="offline",
             notes="Eksperimen dengan reward shaping dan PPO baseline."
         )
         wandb.define_metric("custom/*", step_metric="train/global_step")
@@ -218,7 +227,7 @@ class PPOAgent:
             max_grad_norm=0.5,  # Add gradient clipping
             policy_kwargs=dict(net_arch=[64,64]),
             seed=42,
-            device="cuda"  # ✅ Gunakan GPU
+            device="auto" 
         )
         logger.info("PPO model initialized.")
 
@@ -278,7 +287,6 @@ class PPOAgent:
             
             callbacks.append(system_callback)
 
-            # callback = CallbackList([checkpoint_callback, eval_callback, wandb_callback,system_callback])
             class ProgressLogger(BaseCallback):
                 "progress"
                 def __init__(self, check_interval=1000):
@@ -400,7 +408,6 @@ class PPOAgent:
                 "eval/no_changes": action_counts["no_change"],
                 "train/global_step": self.model.num_timesteps
             })
-            
             return avg_reward
             
         except Exception as e:
@@ -451,6 +458,9 @@ if __name__ == "__main__":
         print("Using REAL environment")
     # Initialize and train agent
     agent = PPOAgent(env)
+    
+    agent.load()
+
     agent.train(
         total_timesteps=args.timesteps,
         eval_episodes=args.eval_episodes
