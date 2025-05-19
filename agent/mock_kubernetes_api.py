@@ -22,13 +22,19 @@ class MockKubernetesAPI:
         self.scale_buffer = []
         self.traffic_simulator = traffic_simulator or self._default_traffic_simulator()
         
-        # Performance characteristics
+        # Optimized performance characteristics
         self.pod_capacity = 500  # Requests per pod
         self.base_latency = 0.2  # Seconds
-        self.pod_startup_time = 15  # Steps to become active
+        self.pod_startup_time = 15  # Reduced from 60 to 15 seconds
         self.failure_rate = 0.05
-        self.scaling_delay = 0
+        self.scaling_delay =2  # Reduced from 60 to 15 seconds
         self.current_step = 0
+        
+        # Optimized scaling thresholds
+        self.scale_up_threshold = 0.75
+        self.scale_down_threshold = 0.65
+        self.scale_up_step = 2
+        self.scale_down_step = 1
 
         # State history for trend analysis
         self.cpu_history = []
@@ -62,21 +68,21 @@ class MockKubernetesAPI:
         effective_capacity = max(1, self.active_pods * self.pod_capacity)
         load_ratio = current_load / effective_capacity
 
-        # Auto-scale based on load ratio
-        if load_ratio > 0.8 and self.current_replicas < self.max_pods:
-            self.current_replicas += 1
-        elif load_ratio < 0.3 and self.current_replicas > 1:
-            self.current_replicas -= 1
+        # Optimized auto-scale based on load ratio
+        if load_ratio > self.scale_up_threshold and self.current_replicas < self.max_pods:
+            self.current_replicas = min(self.max_pods, self.current_replicas + self.scale_up_step)
+        elif load_ratio < self.scale_down_threshold and self.current_replicas > 1:
+            self.current_replicas = max(1, self.current_replicas - self.scale_down_step)
 
         # Apply scaling after delay
         if len(self.scale_buffer) > 0 and len(self.scale_buffer) >= self.scaling_delay:
             self.current_replicas = self.scale_buffer.pop(0)
         
-        # Simulate gradual pod changes
+        # Simulate gradual pod changes with faster scaling
         if self.active_pods < self.current_replicas:
-            self.active_pods += min(1, self.current_replicas - self.active_pods)
+            self.active_pods += min(self.scale_up_step, self.current_replicas - self.active_pods)
         elif self.active_pods > self.current_replicas:
-            self.active_pods -= min(1, self.active_pods - self.current_replicas)
+            self.active_pods -= min(self.scale_down_step, self.active_pods - self.current_replicas)
         
         # Dynamic resource metrics
         cpu_util = min(1.0, 0.2 + 0.8 * load_ratio + self.random.uniform(-0.05, 0.05))
@@ -87,17 +93,13 @@ class MockKubernetesAPI:
         self.cpu_history.append(cpu_util)
         self.memory_history.append(memory_util)
         self.latency_history.append(latency)
-
+        
         return {
-            "pods": self.active_pods,
-            "nodes": min(1 + self.active_pods // 3, self.max_nodes),
             "cpu": cpu_util,
             "memory": memory_util,
             "latency": latency,
-            "swap": self.random.uniform(0, 200e6 * max(0, load_ratio - 0.8)),  # Swap only when overloaded
-            "desired_replicas": self.current_replicas,
-            "current_load": current_load,
-            "capacity_ratio": load_ratio
+            "pods": self.active_pods / self.max_pods,
+            "load_ratio": load_ratio
         }
 
     def safe_scale(self, deployment_name: str, desired_replicas: int) -> bool:

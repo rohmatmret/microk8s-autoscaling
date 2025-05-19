@@ -10,11 +10,10 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from collections import deque
-
 import psutil
 from .mock_kubernetes_api import MockKubernetesAPI
-# from .hybird_simulation import HybridTrafficSimulator
 from .traffic_simulation import TrafficSimulator
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -63,6 +62,7 @@ class MicroK8sEnvSimulated(gym.Env):
         self.state = None
         self.current_step = 0
         self.max_steps = 100
+        self._setup_traffic_events()
 
     def _setup_traffic_events(self):
         """Setup realistic traffic events."""
@@ -122,6 +122,48 @@ class MicroK8sEnvSimulated(gym.Env):
         logger.debug("Environment reset: step=%d, pods=%d", self.current_step, self.pods)
         return self.state, {}
 
+    def _calculate_ideal_pods(self, state: Dict, load_mean: float) -> int:
+        """Calculate the ideal number of pods based on current state and load."""
+        max_pods = self.api.max_pods
+        cpu = state["cpu"]
+        memory = state["memory"] / 500e6  # Convert bytes to normalized value
+        
+        # Load-based calculation with dynamic headroom
+        load_headroom = 1.2  # Base 20% headroom
+        load_gradient = self._calculate_load_gradient()
+        if load_gradient > 0.01:  # If load is increasing
+            load_headroom += 0.1  # Additional 10% headroom
+        load_based_pods = min(max_pods, max(1, round(load_mean * max_pods * load_headroom)))
+        
+        # Resource-based calculation with dynamic thresholds
+        cpu_threshold = 0.6  # Base threshold
+        memory_threshold = 0.6
+        if state["latency"] > 0.7:  # If latency is high
+            cpu_threshold = 0.5  # Be more conservative
+            memory_threshold = 0.5
+        
+        resource_based_pods = max(1, min(max_pods, 
+            round(max(cpu / cpu_threshold, memory / memory_threshold))))
+        
+        # Combine with consideration for current pod count
+        current_pods = state["pods"]
+        if abs(load_based_pods - current_pods) < abs(resource_based_pods - current_pods):
+            ideal_pods = load_based_pods
+        else:
+            ideal_pods = resource_based_pods
+            
+        # Add stability factor to prevent flapping
+        stability_window = 5  # Consider last 5 steps
+        if len(self.load_history) >= stability_window:
+            recent_loads = list(self.load_history)[-stability_window:]
+            load_std = np.std(recent_loads)
+            if load_std < (0.1 * self.LOAD_NORMALIZATION):  # Stable load
+                # Prefer to keep current pods if within reasonable range
+                if (0.8 * ideal_pods <= current_pods <= 1.2 * ideal_pods):
+                    ideal_pods = current_pods
+        
+        return min(max_pods, max(1, ideal_pods))
+
     def step(self, action):
         self.current_step += 1
 
@@ -140,7 +182,8 @@ class MicroK8sEnvSimulated(gym.Env):
             current_pods = current_state["pods"]
             desired_pods = current_state.get("desired_replicas", current_pods)
         except Exception as e:
-            current_state = {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, "latency": 0, "swap": 0, "nodes": 1}
+            current_state = {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, 
+                           "latency": 0, "swap": 0, "nodes": 1}
             logger.error("Error getting cluster state in step function: %s", str(e))
             current_pods = self.pods
             desired_pods = current_pods
@@ -164,9 +207,13 @@ class MicroK8sEnvSimulated(gym.Env):
             obs = self._get_obs(next_state)
             scaling_success = False
 
+        # Calculate ideal pods
+        load_mean = np.mean(self.load_history) / 5000 if self.load_history else 0
+        ideal_pods = self._calculate_ideal_pods(next_state, load_mean)
+
         # Reward calculation
         try:
-            reward = self._calculate_reward(next_state, action, scaling_success)
+            reward = self._calculate_reward(next_state, action, scaling_success, ideal_pods)
         except Exception as e:
             logger.error("Error calculating reward: %s", str(e))
             reward = -1.0
@@ -174,10 +221,6 @@ class MicroK8sEnvSimulated(gym.Env):
         # Metrics tracking
         scaling_lag = desired_pods - next_state["pods"]
         scaling_efficiency = 1 - (abs(scaling_lag) / self.api.max_pods)
-        optimal_pods = max(1, min(
-            int(next_state["cpu"] / 0.6),
-            int((next_state["memory"] / 500e6) / 0.5)
-        ))
 
         info = {
             "custom_metrics": {
@@ -187,13 +230,19 @@ class MicroK8sEnvSimulated(gym.Env):
                 "latency": next_state["latency"],
                 "pod_count": next_state["pods"],
                 "desired_pods": desired_pods,
-                "optimal_pods": optimal_pods,
+                "optimal_pods": ideal_pods,
                 "scaling_lag": scaling_lag,
                 "scaling_efficiency": scaling_efficiency,
                 "scaling_success": float(scaling_success),
                 "scaling_action": action - 1,
-                "load_mean": np.mean(self.load_history) / 5000 if self.load_history else 0,
+                "load_mean": load_mean,
                 "load_gradient": self._calculate_load_gradient(),
+                "ideal_pods_calculation": {
+                    "load_based": min(self.api.max_pods, max(1, round(load_mean * self.api.max_pods * 1.2))),
+                    "resource_based": max(1, min(self.api.max_pods, 
+                        round(max(next_state["cpu"] / 0.6, (next_state["memory"] / 500e6) / 0.6)))),
+                    "final_ideal": ideal_pods
+                },
                 "reward_components": {
                     "cpu_reward": 1.0 if (0.4 <= next_state["cpu"] <= 0.8) else -abs(next_state["cpu"] - 0.6),
                     "memory_reward": 1.0 if (0.3 <= next_state["memory"] / 500e6 <= 0.7) else -abs(next_state["memory"] / 500e6 - 0.5),
@@ -217,6 +266,109 @@ class MicroK8sEnvSimulated(gym.Env):
 
         logger.debug("Step %d: reward=%f, terminated=%s, truncated=%s", self.current_step, reward, terminated, truncated)
         return obs, reward, terminated, truncated, info
+
+    def _calculate_reward(self, state: Dict, action: int, success: bool, ideal_pods: int) -> float:
+        """Complete reward calculation incorporating pod count and utilization."""
+        state = self._validate_state(state)
+        cpu = state["cpu"]
+        memory = state["memory"] / 500e6
+        swap = state["swap"] / 200e6
+        pods = state["pods"]
+        max_pods = self.api.max_pods
+        
+        pod_diff = ideal_pods - pods
+        
+        # Base reward starts negative to encourage action
+        total_reward = -0.1
+        
+        # 1. Resource Utilization (40%)
+        # CPU utilization reward
+        if cpu < 0.3:  # Low utilization
+            if action == 2 and pods > 1:  # Reward scale down
+                total_reward += 0.4
+            elif action == 0 and pods > 1:  # Penalize no action
+                total_reward -= 0.2
+        elif 0.3 <= cpu <= 0.7:  # Optimal range
+            total_reward += 0.3
+        elif 0.7 < cpu <= 0.85:  # Warning zone
+            if action == 1:  # Reward scale up
+                total_reward += 0.3
+            elif action == 0:  # Penalize no action
+                total_reward -= 0.2
+        else:  # High utilization
+            if action == 1:  # Strongly reward scale up
+                total_reward += 0.4
+            else:  # Strongly penalize not scaling up
+                total_reward -= 0.4
+                
+        # Memory utilization reward
+        if memory < 0.3 and pods > 1:
+            if action == 2:  # Reward scale down
+                total_reward += 0.3
+            elif action == 0:  # Small penalty for no action
+                total_reward -= 0.1
+        elif memory > 0.8:
+            if action == 1:  # Reward scale up
+                total_reward += 0.3
+            elif action == 0:  # Penalize no action
+                total_reward -= 0.2
+                
+        # 2. Pod Alignment Reward (30%)
+        if pods == ideal_pods:
+            total_reward += 0.3
+        elif pod_diff > 0:  # Need more pods
+            if action == 1:  # Reward scale up
+                total_reward += 0.3
+            elif action == 0:  # Penalize no action
+                total_reward -= 0.2
+        else:  # Too many pods
+            if cpu < 0.4 and memory < 0.4:  # Only if resources are low
+                if action == 2:  # Reward scale down
+                    total_reward += 0.3
+                elif action == 0 and pods > 1:  # Penalize no action
+                    total_reward -= 0.2
+                    
+        # 3. Load Response (30%)
+        load_gradient = self._calculate_load_gradient()
+        if abs(load_gradient) > 0.008:
+            if load_gradient > 0.008:  # Load increasing
+                if cpu > 0.6 or memory > 0.6:  # Only if resources are getting high
+                    if action == 1:
+                        total_reward += 0.3
+                    elif action == 0:
+                        total_reward -= 0.2
+            elif load_gradient < -0.008:  # Load decreasing
+                if cpu < 0.4 and memory < 0.4 and pods > 1:  # Only if resources are low
+                    if action == 2:
+                        total_reward += 0.3
+                    elif action == 0:
+                        total_reward -= 0.1
+        
+        # Critical condition penalties
+        if cpu > 0.9 or memory > 0.9:
+            total_reward -= 0.5
+            if action != 1:  # Extra penalty for not scaling up
+                total_reward -= 0.3
+        
+        # Swap penalty
+        if swap > 0.1:
+            total_reward -= swap * 0.4
+        
+        # Scaling cost - smaller for scale down than up
+        if action == 1:  # Scale up
+            total_reward -= 0.05
+        elif action == 2:  # Scale down
+            total_reward -= 0.02  # Lower penalty for scaling down
+        
+        # Clip final reward
+        total_reward = float(np.clip(total_reward, -1.0, 1.0))
+        
+        logger.debug(
+            "Step info - CPU: %.2f, Memory: %.2f, Pods: %d, Ideal: %d, Action: %d, Reward: %.2f",
+            cpu, memory, pods, ideal_pods, action, total_reward
+        )
+        
+        return total_reward
 
     def _get_obs(self, state: Dict) -> np.ndarray:
         """Return observation with load trend and gradient using validated state."""
@@ -299,122 +451,6 @@ class MicroK8sEnvSimulated(gym.Env):
                 self.load_history.extend([self.traffic_simulator.base_load] * 
                                       (self.MIN_HISTORY_LENGTH - len(self.load_history)))
 
-    def _calculate_reward(self, state: Dict, action: int, success: bool) -> float:
-        """Complete reward calculation incorporating pod count and utilization."""
-        state = self._validate_state(state)
-        cpu = state["cpu"]
-        memory = state["memory"] / 500e6
-        swap = state["swap"] / 200e6
-        pods = state["pods"]
-        max_pods = self.api.max_pods
-        
-        # Ensure sufficient load history
-        if len(self.load_history) < self.MIN_HISTORY_LENGTH:
-            self.load_history = deque(maxlen=self.MAX_HISTORY_LENGTH)
-            self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
-            
-        # Calculate load characteristics
-        load_mean = np.mean(self.load_history) / 5000
-        load_gradient = self._calculate_load_gradient()
-        
-        # Calculate ideal pods first - this will be used throughout
-        load_based_pods = min(max_pods, max(1, round(load_mean * max_pods * 1.2)))  # 20% headroom
-        resource_based_pods = max(1, min(max_pods, 
-            round(max(cpu / 0.6, memory / 0.6))))  # Moderate thresholds
-        ideal_pods = max(load_based_pods, resource_based_pods)
-        pod_diff = ideal_pods - pods
-        
-        # Base reward starts negative to encourage action
-        total_reward = -0.1
-        
-        # 1. Resource Utilization (40%)
-        # CPU utilization reward
-        if cpu < 0.3:  # Low utilization
-            if action == 2 and pods > 1:  # Reward scale down
-                total_reward += 0.4
-            elif action == 0 and pods > 1:  # Penalize no action
-                total_reward -= 0.2
-        elif 0.3 <= cpu <= 0.7:  # Optimal range
-            total_reward += 0.3
-        elif 0.7 < cpu <= 0.85:  # Warning zone
-            if action == 1:  # Reward scale up
-                total_reward += 0.3
-            elif action == 0:  # Penalize no action
-                total_reward -= 0.2
-        else:  # High utilization
-            if action == 1:  # Strongly reward scale up
-                total_reward += 0.4
-            else:  # Strongly penalize not scaling up
-                total_reward -= 0.4
-                
-        # Memory utilization reward
-        if memory < 0.3 and pods > 1:
-            if action == 2:  # Reward scale down
-                total_reward += 0.3
-            elif action == 0:  # Small penalty for no action
-                total_reward -= 0.1
-        elif memory > 0.8:
-            if action == 1:  # Reward scale up
-                total_reward += 0.3
-            elif action == 0:  # Penalize no action
-                total_reward -= 0.2
-                
-        # 2. Pod Alignment Reward (30%)
-        if pods == ideal_pods:
-            total_reward += 0.3
-        elif pod_diff > 0:  # Need more pods
-            if action == 1:  # Reward scale up
-                total_reward += 0.3
-            elif action == 0:  # Penalize no action
-                total_reward -= 0.2
-        else:  # Too many pods
-            if cpu < 0.4 and memory < 0.4:  # Only if resources are low
-                if action == 2:  # Reward scale down
-                    total_reward += 0.3
-                elif action == 0 and pods > 1:  # Penalize no action
-                    total_reward -= 0.2
-                    
-        # 3. Load Response (30%)
-        if abs(load_gradient) > 0.008:
-            if load_gradient > 0.008:  # Load increasing
-                if cpu > 0.6 or memory > 0.6:  # Only if resources are getting high
-                    if action == 1:
-                        total_reward += 0.3
-                    elif action == 0:
-                        total_reward -= 0.2
-            elif load_gradient < -0.008:  # Load decreasing
-                if cpu < 0.4 and memory < 0.4 and pods > 1:  # Only if resources are low
-                    if action == 2:
-                        total_reward += 0.3
-                    elif action == 0:
-                        total_reward -= 0.1
-        
-        # Critical condition penalties
-        if cpu > 0.9 or memory > 0.9:
-            total_reward -= 0.5
-            if action != 1:  # Extra penalty for not scaling up
-                total_reward -= 0.3
-        
-        # Swap penalty
-        if swap > 0.1:
-            total_reward -= swap * 0.4
-        
-        # Scaling cost - smaller for scale down than up
-        if action == 1:  # Scale up
-            total_reward -= 0.05
-        elif action == 2:  # Scale down
-            total_reward -= 0.02  # Lower penalty for scaling down
-        
-        # Clip final reward
-        total_reward = float(np.clip(total_reward, -1.0, 1.0))
-        
-        logger.debug(
-            "Step info - CPU: %.2f, Memory: %.2f, Pods: %d, Ideal: %d, Action: %d, Reward: %.2f",
-            cpu, memory, pods, ideal_pods, action, total_reward
-        )
-        
-        return total_reward
-
     def _traffic_response_reward(self, action: int, state: Dict) -> float:
         """Reward for responding to traffic patterns."""
         try:
@@ -460,7 +496,8 @@ class MicroK8sEnvSimulated(gym.Env):
             return state
         except Exception as e:
             logger.error("Error getting cluster state: %s", str(e))
-            return {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, "latency": 0, "swap": 0, "nodes": 1}
+            return {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, 
+                   "latency": 0, "swap": 0, "nodes": 1}
         
     def _validate_state(self, state: Dict) -> Dict:
         """Ensure the state dictionary contains all required keys with valid values."""
