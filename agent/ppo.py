@@ -6,7 +6,7 @@ import logging
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList,BaseCallback
-from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.env_util import make_vec_env,SubprocVecEnv
 from stable_baselines3.common.utils import get_linear_fn
 import wandb
 from wandb.integration.sb3 import WandbCallback
@@ -118,6 +118,76 @@ class ScalingMetricsCallback(BaseCallback):
         logger.info("[Training] Scale ups: %d, Scale downs: %d, No changes: %d", 
                    self.scale_ups, self.scale_downs, self.no_changes)
 
+class ImprovementCallback(BaseCallback):
+    def __init__(self, model_dir, eval_env, verbose=0):
+        super().__init__(verbose)
+        self.model_dir = model_dir
+        self.eval_env = eval_env
+        self.best_reward = float('-inf')
+        self.best_stability = float('inf')
+        self.best_cpu_util = float('inf')
+        self.best_memory_util = float('inf')
+        self.improvement_threshold = 0.05
+
+    def _on_step(self) -> bool:
+        return True
+
+    def get_current_metrics(self):
+        """Get current performance metrics."""
+        try:
+            eval_rewards = []
+            cpu_utils = []
+            memory_utils = []
+            
+            for _ in range(10):  # Use 10 episodes for evaluation
+                obs = self.eval_env.reset()
+                done = False
+                episode_reward = 0
+                
+                while not done:
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    obs, reward, done, info = self.eval_env.step(action)
+                    episode_reward += reward
+                    
+                    if isinstance(info, list) and len(info) > 0:
+                        info = info[0]
+                    if 'custom_metrics' in info:
+                        metrics = info['custom_metrics']
+                        cpu_utils.append(metrics.get('cpu_utilization', 0))
+                        memory_utils.append(metrics.get('memory_utilization', 0))
+                
+                eval_rewards.append(episode_reward)
+            
+            return {
+                'reward': np.mean(eval_rewards),
+                'stability': np.std(eval_rewards),
+                'cpu_util': np.mean(cpu_utils),
+                'memory_util': np.mean(memory_utils)
+            }
+        except Exception as e:
+            logger.error(f"Error getting metrics: {e}")
+            return {
+                'reward': float('-inf'),
+                'stability': float('inf'),
+                'cpu_util': float('inf'),
+                'memory_util': float('inf')
+            }
+
+    def check_improvement(self, current_metrics):
+        """Check if current metrics show improvement."""
+        reward_improvement = (
+            current_metrics['reward'] > self.best_reward * (1 + self.improvement_threshold)
+        )
+        stability_improvement = (
+            current_metrics['stability'] < self.best_stability * (1 - self.improvement_threshold)
+        )
+        resource_improvement = (
+            current_metrics['cpu_util'] < self.best_cpu_util * (1 - self.improvement_threshold) and
+            current_metrics['memory_util'] < self.best_memory_util * (1 - self.improvement_threshold)
+        )
+        
+        return sum([reward_improvement, stability_improvement, resource_improvement]) >= 2
+
 class PPOAgent:
     """PPO agent for MicroK8s autoscaling."""
 
@@ -194,9 +264,10 @@ class PPOAgent:
 
     def _initialize_evaluation_environment(self):
         """Initializes the evaluation environment."""
+        # env = SubprocVecEnv([lambda: MicroK8sEnvSimulated() for _ in range(4)])
         self.eval_env = make_vec_env(
             lambda: MicroK8sEnvSimulated(),
-            n_envs=1
+            n_envs=1,
         )
         
         # Update traffic simulator parameters for evaluation
@@ -234,16 +305,22 @@ class PPOAgent:
     def train(self, total_timesteps: int = 50000, checkpoint_freq: int = 10000, 
         eval_episodes=10) -> None:
         
-        """Train the PPO model."""
-
+        """Train the PPO model with improvement-based saving."""
         try:
             # --- Callback Setup ---
             callbacks = []
             
+            # Add improvement tracking callback
+            improvement_callback = ImprovementCallback(
+                model_dir=self.model_dir,
+                eval_env=self.eval_env
+            )
+            callbacks.append(improvement_callback)
+            
+            # Add other callbacks
             vis_callback = VisualizationCallback(self.env)
             callbacks.append(vis_callback)
             
-            # Add scaling metrics callback
             scaling_callback = ScalingMetricsCallback()
             callbacks.append(scaling_callback)
             
@@ -272,23 +349,21 @@ class PPOAgent:
                 gradient_save_freq=100,
                 model_save_freq=checkpoint_freq,
             )
-            
             callbacks.append(wandb_callback)
             
-            system_callback = SystemMetricsCallback(self.env,
-                                log_freq=1000,
-                                metrics_to_track=[
-                                    'cpu_utilization',
-                                    'memory_utilization',
-                                    'pod_count',
-                                    'scaling_lag'
-                                ]
-                            )
-            
+            system_callback = SystemMetricsCallback(
+                self.env,
+                log_freq=1000,
+                metrics_to_track=[
+                    'cpu_utilization',
+                    'memory_utilization',
+                    'pod_count',
+                    'scaling_lag'
+                ]
+            )
             callbacks.append(system_callback)
 
             class ProgressLogger(BaseCallback):
-                "progress"
                 def __init__(self, check_interval=1000):
                     super().__init__()
                     self.check_interval = check_interval
@@ -297,24 +372,31 @@ class PPOAgent:
                     if self.n_calls % self.check_interval == 0:
                         logger.info("Progress: %.1f%%", 100 * self.num_timesteps / total_timesteps)
                         if hasattr(self.model, 'env'):
-                            try:
-                                wandb.log({
-                                    "progress": self.num_timesteps/total_timesteps,
-                                    "timesteps": self.num_timesteps
-                                })
-                            except:
-                                logger.warning("Failed to log progress to W&B")
+                            wandb.log({
+                                "progress": self.num_timesteps/total_timesteps,
+                                "timesteps": self.num_timesteps
+                            })
                     return True
                     
             callbacks.append(ProgressLogger())
 
+            # Train the model
             self.model.learn(
                 total_timesteps=total_timesteps,
                 callback=CallbackList(callbacks),
                 log_interval=10
             )
-            self.save()
+            
+            # Final evaluation and save if improved
+            final_metrics = improvement_callback.get_current_metrics()
+            if improvement_callback.check_improvement(final_metrics):
+                logger.info("Final model showed improvement, saving")
+                self.save()
+            else:
+                logger.info("Final model did not show improvement, keeping previous version")
+            
             logger.info("Training completed for %d timesteps", total_timesteps)
+            
         except Exception as e:
             logger.error("Training failed: %s", e)
             raise
