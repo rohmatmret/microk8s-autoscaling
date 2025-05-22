@@ -1,5 +1,11 @@
 # MicroK8s Adaptive Autoscaling with Reinforcement Learning
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kubernetes/kubernetes/master/logo/logo.png" alt="Kubernetes" height="48" style="vertical-align:middle; margin-left:10px;"/>
+    <img src="https://www.tensorflow.org/images/tf_logo_social.png" alt="TensorFlow" height="48" style="vertical-align:middle; margin-left:10px;"/>
+    <img src="https://site.wandb.ai/wp-content/uploads/2023/05/wb-cw.svg" alt="Weights & Biases" height="48" style="vertical-align:middle; margin-left:10px;"/>
+</p>
+
 **MicroK8s** | **Reinforcement Learning** | **k6 Load Testing**
 
 Cost-Efficient Solution for Startup Scalability  
@@ -8,7 +14,7 @@ This project integrates **MicroK8s** (lightweight Kubernetes) with **Reinforceme
 ---
 
 ## 📋 Key Features
-- 🚀 **Two-layer autoscaling** (Pod + Node) based on RL (DQN/PPO)  
+- 🚀 **Autoscaling** (Pod ) based on RL (DQN/PPO)  
 - 📉 Optimization for **latency (<200ms)** and **resource efficiency (CPU/memory <85%)**  
 - 💡 Local simulation using **k6** and monitoring via **Prometheus+Grafana** for cost-saving
 
@@ -27,29 +33,20 @@ This project integrates **MicroK8s** (lightweight Kubernetes) with **Reinforceme
 - **Reinforcement Learning** (DQN/PPO algorithms)
 - **k6** for load testing
 - **Prometheus + Grafana** for monitoring
+- **Python** for RL agent implementation
+- **Wandb** for experiment tracking
+
+
+# Infrastructure Architecture 
+
+![Local Diagram Infrastructure architecture ](/out/architecture/MicroK8s-Full-Architecture.svg)
+
 
 ### Software Dependencies
 - MicroK8s: `snap install microk8s --classic`
 - k6: `sudo apt-get install k6`
 - Python 3.8+ with packages:
 
-### Software
-```bash
-# MicroK8s
-snap install microk8s --classic
-
-# k6
-sudo apt-get install k6
-
-# macOS
-brew install k6
-
-# Windows
-choco install k6
-
-# Python
-pip install tensorflow pytorch kubernetes
-```
 
 # Setup Instructions
 1. **Install MicroK8s**: Follow the [MicroK8s installation guide](https://microk8s.io/docs/installing-on-linux) for your OS.
@@ -289,7 +286,3 @@ sudo make  train-simulation AGENT=ppo ENV_MODE=simulate TIMESTEPS=100000 EVAL_EP
 ```
 sudo make  train-simulation AGENT=dqn ENV_MODE=simulate TIMESTEPS=100000 EVAL_EPISODES=100
 ```
-
-# Infrastructure Architecture 
-
-![Local Diagram Infrastructure architecture ](/out/architecture/MicroK8s-Full-Architecture.svg)
