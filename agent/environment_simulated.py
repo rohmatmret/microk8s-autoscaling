@@ -179,11 +179,20 @@ class MicroK8sEnvSimulated(gym.Env):
         # Get current state
         try:
             current_state = self.api.get_cluster_state()
+            # Ensure swap is present in current state
+            if "swap" not in current_state:
+                current_state["swap"] = 0.0
             current_pods = current_state["pods"]
             desired_pods = current_state.get("desired_replicas", current_pods)
         except Exception as e:
-            current_state = {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, 
-                           "latency": 0, "swap": 0, "nodes": 1}
+            current_state = {
+                "pods": self.pods,
+                "cpu": self.cpu_util,
+                "memory": self.memory_util * 500e6,
+                "latency": 0.0,
+                "swap": 0.0,
+                "nodes": 1
+            }
             logger.error("Error getting cluster state in step function: %s", str(e))
             current_pods = self.pods
             desired_pods = current_pods
@@ -200,6 +209,9 @@ class MicroK8sEnvSimulated(gym.Env):
             # Simulate scaling operation
             scaling_success = self.api.safe_scale("autoscaler", target_pods)
             next_state = self.api.get_cluster_state()
+            # Ensure swap is present in next state
+            if "swap" not in next_state:
+                next_state["swap"] = 0.0
             obs = self._get_obs(next_state)
         except Exception as e:
             logger.error("Error applying action: %s", str(e))
@@ -226,7 +238,7 @@ class MicroK8sEnvSimulated(gym.Env):
             "custom_metrics": {
                 "cpu_utilization": next_state["cpu"],
                 "memory_utilization": next_state["memory"] / 500e6,
-                "swap_usage": next_state["swap"] / 200e6,
+                "swap_usage": next_state.get("swap", 0.0) / 200e6,  # Use get() with default value
                 "latency": next_state["latency"],
                 "pod_count": next_state["pods"],
                 "desired_pods": desired_pods,
@@ -246,7 +258,7 @@ class MicroK8sEnvSimulated(gym.Env):
                 "reward_components": {
                     "cpu_reward": 1.0 if (0.4 <= next_state["cpu"] <= 0.8) else -abs(next_state["cpu"] - 0.6),
                     "memory_reward": 1.0 if (0.3 <= next_state["memory"] / 500e6 <= 0.7) else -abs(next_state["memory"] / 500e6 - 0.5),
-                    "swap_penalty": -(next_state["swap"] / 200e6),
+                    "swap_penalty": -(next_state.get("swap", 0.0) / 200e6),  # Use get() with default value
                     "scaling_penalty": -0.1 if action != 0 else 0,
                     "traffic_response": self._traffic_response_reward(action, next_state)
                 }
@@ -259,7 +271,7 @@ class MicroK8sEnvSimulated(gym.Env):
         }
 
         # Termination conditions
-        terminated = next_state["swap"] / 200e6 > 0.8 or next_state["cpu"] > 0.9 or next_state["memory"] / 500e6 > 0.9
+        terminated = next_state.get("swap", 0.0) / 200e6 > 0.8 or next_state["cpu"] > 0.9 or next_state["memory"] / 500e6 > 0.9
         truncated = self.current_step >= self.max_steps
         if terminated:
             reward -= 5
@@ -492,12 +504,21 @@ class MicroK8sEnvSimulated(gym.Env):
     def get_cluster_state(self):
         try:
             state = self.api.get_cluster_state()
+            # Ensure swap is present in the state
+            if "swap" not in state:
+                state["swap"] = 0.0
             logger.debug("Cluster state: %s", state)
             return state
         except Exception as e:
             logger.error("Error getting cluster state: %s", str(e))
-            return {"pods": self.pods, "cpu": self.cpu_util, "memory": self.memory_util * 500e6, 
-                   "latency": 0, "swap": 0, "nodes": 1}
+            return {
+                "pods": self.pods,
+                "cpu": self.cpu_util,
+                "memory": self.memory_util * 500e6,
+                "latency": 0.0,
+                "swap": 0.0,  # Ensure swap is present in error case
+                "nodes": 1
+            }
         
     def _validate_state(self, state: Dict) -> Dict:
         """Ensure the state dictionary contains all required keys with valid values."""
@@ -508,7 +529,7 @@ class MicroK8sEnvSimulated(gym.Env):
             "cpu": float(state.get("cpu", self.DEFAULT_CPU)),
             "memory": float(state.get("memory", self.DEFAULT_MEMORY_BYTES)),
             "latency": float(state.get("latency", 0.0)),
-            "swap": float(state.get("swap", 0.0)),
+            "swap": float(state.get("swap", 0.0)),  # Ensure swap is always present
             "nodes": int(state.get("nodes", self.DEFAULT_NODES)),
             "pods": int(state.get("pods", self.pods))
         }
