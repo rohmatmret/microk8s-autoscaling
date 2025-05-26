@@ -18,6 +18,22 @@ This project integrates **MicroK8s** (lightweight Kubernetes) with **Reinforceme
 - 📉 Optimization for **latency (<200ms)** and **resource efficiency (CPU/memory <85%)**  
 - 💡 Local simulation using **k6** and monitoring via **Prometheus+Grafana** for cost-saving
 
+## 🔄 Autoscaling Solutions Comparison
+
+| Functional Aspect | Traditional HPA | KEDA (Kubernetes Event-Driven Autoscaler) | RL Adaptive (This Thesis: DQN + PPO) |
+|-------------------|----------------|------------------------------------------|--------------------------------------|
+| **Scaling Paradigm** | Reactive based on static thresholds | Reactive based on event triggers | Proactive and adaptive based on policy learning |
+| **Scaling Triggers** | Internal system metrics (CPU, memory) | External events from message queues, databases, Prometheus metrics, etc. | Simulation environment state: CPU, latency, queue, and dynamically evaluated rewards |
+| **Decision-Making Strategy** | Fixed interval evaluation and metric-based averaging | Event detection through manually configured scalers and triggers | Decision-making based on estimated values (Q-values) and long-term reward optimization |
+| **Workload Adaptation Flexibility** | Limited to stable and repetitive load scenarios | More flexible, but still based on static rules | Highly adaptive to dynamic loads and real-time workload pattern changes |
+| **Learning Model** | None (rule-based logic) | None (event mapping) | Deep Reinforcement Learning: combination of DQN (decision-making) and PPO (policy optimization) |
+| **Scaling Control Granularity** | Limited to pod count | Supports granular triggers (e.g., queues, connections) | Policy-based considering multi-metric state, including queues and latency |
+| **Latency Sensitivity** | Not sensitive to application latency | Responsive to events but doesn't consider latency rewards | Explicit reward function considers latency and throughput as primary components |
+| **Configuration & Operation Complexity** | Low; simple YAML-based configuration | Medium; requires integration with external event sources | High; involves RL model training, agent coordination, and hyperparameter tuning |
+| **Generalization & Transferability** | Low; difficult to adapt to new patterns | Limited to predefined events | High; ability to generalize from previous experiences to new workload patterns |
+| **System Overhead** | Minimal; efficient for simple applications | Low to medium depending on trigger complexity | Medium to high; overhead in training and model inference phases |
+| **Additional Infrastructure Dependencies** | No additional components required | Requires relevant scalers and triggers | Requires monitoring pipeline (e.g., Prometheus), logging, and RL framework integration |
+
 ---
 
 ## 🛠 Requirements
