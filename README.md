@@ -13,12 +13,37 @@ This project integrates **MicroK8s** (lightweight Kubernetes) with **Reinforceme
 
 ---
 
+## ⚠️ Development Status
+
+> **🚧 This project is currently under active development and is NOT production-ready.**
+> 
+> **Current Status:**
+> - ✅ Research and proof-of-concept implementation
+> - ✅ Basic RL agent implementation (DQN/PPO)
+> - ✅ Simulation environment and testing framework
+> - ✅ Local development setup and documentation
+> - 🔄 Ongoing optimization and testing
+> - ❌ Not tested in production environments
+> - ❌ No production deployment guidelines
+> - ❌ Limited error handling and edge case coverage
+> 
+> **⚠️ Important Notes:**
+> - This is primarily a research project and thesis implementation
+> - Use only for learning, experimentation, and development purposes
+> - Do not deploy in production environments without thorough testing
+> - The RL models require significant training and tuning for real-world scenarios
+> - Performance characteristics may vary significantly in production environments
+> 
+> **Contributions Welcome:** If you're interested in helping make this production-ready, please check the issues and contribute!
+
+---
+
 ## 📋 Key Features
 - 🚀 **Autoscaling** (Pod ) based on RL (DQN/PPO)  
 - 📉 Optimization for **latency (<200ms)** and **resource efficiency (CPU/memory <85%)**  
 - 💡 Local simulation using **k6** and monitoring via **Prometheus+Grafana** for cost-saving
 
-## 🔄 Autoscaling Solutions Comparison
+## 🔄 Autoscaling Solutions Comparison Goals
 
 | Functional Aspect | Traditional HPA | KEDA (Kubernetes Event-Driven Autoscaler) | RL Adaptive (This Thesis: DQN + PPO) |
 |-------------------|----------------|------------------------------------------|--------------------------------------|
