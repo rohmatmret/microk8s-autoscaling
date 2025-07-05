@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nginx-deployment
+  name: nginx
   namespace: default
 spec:
   replicas: 1
@@ -35,6 +35,13 @@ spec:
             - "-nginx.scrape-uri=http://127.0.0.1/nginx_status"
           ports:
             - containerPort: 9113
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "50m"
+              memory: "64Mi"
       volumes:
         - name: nginx-config-volume
           configMap:
@@ -43,7 +50,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: nginx-service
+  name: nginx
   namespace: default
   labels:
     app: nginx
@@ -59,23 +66,3 @@ spec:
       targetPort: 9113
   type: ClusterIP
 
-
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: nginx-ingress
-  namespace: default
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
-spec:
-  rules:
-    - http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: nginx-service
-                port:
-                  number: 80
