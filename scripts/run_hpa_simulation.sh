@@ -86,7 +86,43 @@ microk8s status
 
 # Enable required addons
 print_status "Enabling required MicroK8s addons..."
-# microk8s enable ingress
+
+# Enable Ingress
+print_status "Enabling Ingress..."
+microk8s enable ingress
+print_success "Ingress enabled."
+
+# Enable MetalLB to provide a public IP address for the Ingress controller.
+# The best solution isn't one or the other; you actually need both to work together.
+# They solve two different problems:
+#
+# MetalLB's Job (The Street Address): MetalLB gives your cluster a public IP address.
+# It gives the Ingress controller a reachable, external entry point.
+#
+# Ingress's Job (The Receptionist): The Ingress controller and your Ingress rule
+# act like a receptionist. It sits at that public IP address and directs incoming
+# traffic to the correct internal service (nginx) based on the rules you define.
+#
+# Think of it like an apartment building:
+# - MetalLB provides the building's public street address so people can find it.
+# - The Ingress controller is the front desk that takes your request and directs you
+#   to the correct apartment (nginx service).
+print_status "Enabling MetalLB..."
+# Determine a suitable IP range for MetalLB from the node's IP.
+NODE_IP_FOR_METALLB=$(get_node_ip)
+if [ -z "$NODE_IP_FOR_METALLB" ]; then
+    print_warning "Could not determine node IP for MetalLB configuration. You may need to configure MetalLB manually."
+    # Fallback to a default range, which may or may not work.
+    METALLB_RANGE="192.168.0.150-192.168.0.200"
+else
+    # This creates a range like 192.168.1.240-192.168.1.250 from an IP like 192.168.1.100
+    IP_PREFIX=$(echo "$NODE_IP_FOR_METALLB" | cut -d. -f1-3)
+    METALLB_RANGE="$IP_PREFIX.240-$IP_PREFIX.250"
+fi
+print_status "Attempting to configure MetalLB with IP range: $METALLB_RANGE"
+microk8s enable metallb:"$METALLB_RANGE"
+print_success "MetalLB enabled."
+
 # microk8s enable metrics-server
 # microk8s enable monitoring
 
@@ -171,6 +207,9 @@ kubectl get pods -o wide
 kubectl get services
 kubectl get hpa
 kubectl get ingress
+
+kubectl get svc -n ingress
+
 
 # Start monitoring in background
 print_status "Starting monitoring..."
