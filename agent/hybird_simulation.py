@@ -30,8 +30,13 @@ class HybridTrafficSimulator:
         self.rng = np.random.default_rng(seed)
         self.base_load = base_load
         self.event_frequency = event_frequency
-        self.min_intensity = min_intensity
-        self.max_intensity = max_intensity
+        # Ensure min_intensity < max_intensity to avoid "high - low < 0" error
+        if min_intensity >= max_intensity:
+            self.min_intensity = max_intensity * 0.3
+            self.max_intensity = max_intensity
+        else:
+            self.min_intensity = min_intensity
+            self.max_intensity = max_intensity
         self.min_duration = min_duration
         self.max_duration = max_duration
         self.current_load = base_load

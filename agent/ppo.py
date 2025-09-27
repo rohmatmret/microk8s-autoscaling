@@ -524,6 +524,54 @@ class PPOAgent:
         self.model = PPO.load(path, env=self.env)
         logger.info("Model loaded from %s", path)
 
+    def decide_action(self, cpu_utilization: float, current_pods: int, step: int = 0) -> int:
+        """Decide scaling action using the trained PPO model."""
+        try:
+            # Create observation state matching environment's 7-dimensional space
+            # [cpu, memory, latency, swap, nodes, load_mean, load_gradient]
+            state = np.array([
+                cpu_utilization,  # CPU utilization
+                0.5,  # Memory utilization (placeholder)
+                0.1,  # Latency (placeholder)
+                0.0,  # Swap usage (placeholder)
+                current_pods / 10.0,  # Normalized nodes/pods
+                cpu_utilization,  # Load mean (use cpu as proxy)
+                0.0   # Load gradient (placeholder)
+            ], dtype=np.float32)
+
+            # Get action from model
+            action, _ = self.model.predict(state, deterministic=True)
+            return int(action)
+        except Exception as e:
+            logger.warning(f"PPO predict failed: {e}, using default action")
+            # Fallback to simple rule-based logic
+            if cpu_utilization > 0.8 and current_pods < 10:
+                return 0  # Scale up
+            elif cpu_utilization < 0.3 and current_pods > 1:
+                return 1  # Scale down
+            else:
+                return 2  # No change
+
+    def get_scaling_decision(self, state) -> int:
+        """Alternative method name for compatibility."""
+        try:
+            # State should already be in the correct 7-dimensional format
+            if len(state) == 7:
+                # Use the state directly with the model
+                action, _ = self.model.predict(state, deterministic=True)
+                return int(action)
+            else:
+                # Fallback: extract what we can and use decide_action
+                cpu_util = state[0] if len(state) > 0 else 0.5
+                pod_count = int(state[4] * 10) if len(state) > 4 else 3  # nodes is at index 4
+                return self.decide_action(cpu_util, pod_count)
+        except Exception as e:
+            logger.warning(f"PPO get_scaling_decision failed: {e}, using fallback")
+            # Extract basic values for fallback
+            cpu_util = state[0] if len(state) > 0 else 0.5
+            pod_count = 3  # default
+            return self.decide_action(cpu_util, pod_count)
+
 def parse_args():
     """Parse command-line arguments."""
 

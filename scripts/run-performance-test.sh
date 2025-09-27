@@ -87,6 +87,7 @@ run_performance_test() {
     export MOCK_MODE="$mock_mode"
     export METRICS_DIR="$METRICS_DIR"
     export RESULTS_DIR="$RESULTS_DIR"
+    export WANDB_MODE=offline
 
     # Run the performance test
     python3 "$EXAMPLES_DIR/hybrid_traffic_simulation.py" 2>&1 | tee "$RESULTS_DIR/test_log_$(date +%Y%m%d_%H%M%S).log"

@@ -364,11 +364,14 @@ class AgentPerformanceTester:
 
         # Create traffic simulator based on scenario
         if scenario.traffic_pattern == "hybrid":
+            max_intensity = scenario.max_load / scenario.base_load
+            min_intensity = min(1.5, max_intensity * 0.3)  # Ensure min < max
             simulator = HybridTrafficSimulator(
                 base_load=scenario.base_load,
                 seed=42,
                 event_frequency=scenario.event_frequency,
-                max_intensity=scenario.max_load / scenario.base_load
+                min_intensity=min_intensity,
+                max_intensity=max_intensity
             )
         else:
             simulator = TrafficSimulator(
@@ -411,14 +414,16 @@ class AgentPerformanceTester:
                 throughput = min(current_load, current_pods * 100)
                 queue_length = max(0, current_load - throughput) / 100.0
 
-                # Create state vector for RL agents
+                # Create state vector for RL agents (7-dimensional to match environment)
+                # [cpu, memory, latency, swap, nodes, load_mean, load_gradient]
                 state = np.array([
-                    cpu_utilization,
+                    cpu_utilization,  # CPU utilization
                     np.random.uniform(0.3, 0.7),  # memory utilization
-                    response_time / 0.5,  # normalized response time
-                    current_pods / 10.0,  # normalized pod count
-                    queue_length,
-                    throughput / 1000.0  # normalized throughput
+                    response_time / 0.5,  # normalized latency/response time
+                    0.0,  # swap usage (placeholder)
+                    current_pods / 10.0,  # normalized nodes/pod count
+                    cpu_utilization,  # load mean (use cpu as proxy)
+                    0.0   # load gradient (placeholder)
                 ])
 
                 # Get agent action
