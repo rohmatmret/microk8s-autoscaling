@@ -131,9 +131,9 @@ run_real_cluster_test() {
 analyze_results() {
     print_status "Analyzing recent test results..."
 
-    # Find the most recent results
-    latest_json=$(find "$RESULTS_DIR" -name "performance_study_*.json" -type f -printf '%T@ %p\n' | sort -k 1nr | head -1 | cut -d' ' -f2-)
-    latest_csv=$(find "$METRICS_DIR" -name "autoscaler_metrics_*.csv" -type f -printf '%T@ %p\n' | sort -k 1nr | head -1 | cut -d' ' -f2-)
+    # Find the most recent results (macOS compatible)
+    latest_json=$(find "$RESULTS_DIR" -name "performance_study_*.json" -type f -exec stat -f "%m %N" {} \; 2>/dev/null | sort -k 1nr | head -1 | cut -d' ' -f2-)
+    latest_csv=$(find "$METRICS_DIR" -name "autoscaler_metrics_*.csv" -type f -exec stat -f "%m %N" {} \; 2>/dev/null | sort -k 1nr | head -1 | cut -d' ' -f2-)
 
     if [ -n "$latest_json" ]; then
         print_status "Latest results file: $latest_json"
