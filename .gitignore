@@ -177,3 +177,5 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 venv/
+dqn_tensorboard/
+ppo_tensorboard/
