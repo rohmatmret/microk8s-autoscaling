@@ -7,6 +7,7 @@ import numpy as np
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList, BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.utils import get_linear_fn
 from wandb.integration.sb3 import WandbCallback
 import torch
 from stable_baselines3.dqn import MlpPolicy
@@ -157,7 +158,8 @@ class DQNAgent:
                 },
                 tags=["autoscaling", "DQN", "simulated" if self.is_simulated else "real"],
                 sync_tensorboard=False,
-                tensorboard=False
+                tensorboard=False,
+                mode="offline"
             )
             
             # Define custom metric grouping
@@ -175,18 +177,19 @@ class DQNAgent:
             self.model = DQN(
                 policy=MlpPolicy,
                 env=self.env,
-                learning_rate=config.get('learning_rate', 0.0005),  # Higher learning rate for faster action learning
+                # learning_rate=config.get('learning_rate', 0.0005),  
+                learning_rate = get_linear_fn(0.0005, 0.0001, 1.0),
                 buffer_size=config.get('buffer_size', 100000),      # Larger buffer to remember scaling decisions
                 batch_size=config.get('batch_size', 64),           # Smaller batch for more frequent updates
-                gamma=0.95,                                        # Lower gamma to focus on immediate scaling needs
-                tau=0.01,                                          # Higher tau for faster policy updates
+                gamma=0.99,                                        # Lower gamma to focus on immediate scaling needs
+                tau=0.1,                                       # Higher tau for faster policy updates
                 train_freq=4,                                      # Train every 4 steps
-                gradient_steps=1,
+                gradient_steps=2,
                 learning_starts=5000,                              # Start learning after collecting some scaling experiences
-                target_update_interval=5000,                       # Update target network more frequently
-                exploration_fraction=0.3,                          # Longer exploration period
+                target_update_interval=2000,                       # Update target network more frequently
+                exploration_fraction=0.2,                          # Longer exploration period
                 exploration_initial_eps=1.0,                       # Start with full exploration
-                exploration_final_eps=0.1,                         # Keep some exploration for adapting to traffic changes
+                exploration_final_eps=0.07,                         # Keep some exploration for adapting to traffic changes
                 max_grad_norm=10,
                 verbose=1,
                 seed=config.get('seed', 42),
@@ -195,7 +198,8 @@ class DQNAgent:
                     net_arch=[64, 64],                            # Simpler network for faster learning
                     activation_fn=torch.nn.ReLU
                 ),
-                device="cuda"
+                device = "auto",
+                optimize_memory_usage=False,
             )
              
         except Exception as e:
@@ -272,7 +276,7 @@ class DQNAgent:
 
             for episode in range(episodes):
                 # Handle environment reset
-                reset_result = self.env.reset()
+                reset_result = self.eval_env.reset()
                 if isinstance(reset_result, tuple):
                     obs = reset_result[0]  # Gym API returns (obs, info)
                 else:
@@ -281,7 +285,7 @@ class DQNAgent:
                 episode_reward = 0
                 while not done:
                     action, _ = self.model.predict(obs, deterministic=True)
-                    step_result = self.env.step(action)
+                    step_result = self.eval_env.step(action)
                     
                     # Handle both Gym API and VecEnv API step returns
                     if isinstance(step_result, tuple) and len(step_result) == 1:
@@ -423,6 +427,8 @@ def main():
             learning_rate=args.learning_rate,
             batch_size=args.batch_size
         )
+    
+        agent.load()
 
         # Train with more episodes for better scaling policy learning
         agent.train(

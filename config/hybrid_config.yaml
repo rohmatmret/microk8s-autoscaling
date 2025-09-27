@@ -1,0 +1,36 @@
+dqn:
+  batch_size: 64
+  buffer_size: 100000
+  epsilon_decay: 0.995
+  epsilon_end: 0.07
+  epsilon_start: 1.0
+  gamma: 0.99
+  learning_rate: 0.0005
+  target_update_freq: 2000
+  tau: 0.1
+environment:
+  deployment_name: nginx-deployment
+  max_pods: 10
+  metrics_sync_interval: 10
+  namespace: default
+  prometheus_url: http://localhost:9090
+  scaling_delay: 10
+hybrid:
+  action_dim: 3
+  batch_evaluation_steps: 50
+  hidden_dim: 64
+  reward_optimization_freq: 100
+  state_dim: 6
+ppo:
+  batch_size: 64
+  clip_range: 0.2
+  ent_coef: 0.01
+  gae_lambda: 0.95
+  gamma: 0.99
+  learning_rate: 0.0003
+  n_steps: 2048
+training:
+  checkpoint_freq: 5000
+  eval_freq: 1000
+  log_freq: 100
+  total_steps: 50000

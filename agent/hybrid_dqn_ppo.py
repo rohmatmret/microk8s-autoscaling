@@ -1,0 +1,738 @@
+import os
+import logging
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from typing import Dict, Any, Optional, Tuple, List
+from collections import deque
+import random
+from datetime import datetime
+import wandb
+from dataclasses import dataclass
+from agent.kubernetes_api import KubernetesAPI
+from agent.bayesian_optimization import BayesianOptimizer
+from agent.metrics_callback import AutoscalingMetricsCallback
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("hybrid_agent.log"), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class HybridConfig:
+    """Configuration for hybrid DQN-PPO agent."""
+    # DQN Configuration
+    dqn_learning_rate: float = 0.0005
+    dqn_buffer_size: int = 100000
+    dqn_batch_size: int = 64
+    dqn_gamma: float = 0.99
+    dqn_tau: float = 0.1
+    dqn_epsilon_start: float = 1.0
+    dqn_epsilon_end: float = 0.07
+    dqn_epsilon_decay: float = 0.995
+    dqn_target_update_freq: int = 2000
+    
+    # PPO Configuration
+    ppo_learning_rate: float = 0.0003
+    ppo_n_steps: int = 2048
+    ppo_batch_size: int = 64
+    ppo_gamma: float = 0.99
+    ppo_gae_lambda: float = 0.95
+    ppo_clip_range: float = 0.2
+    ppo_ent_coef: float = 0.01
+    
+    # Hybrid Configuration
+    reward_optimization_freq: int = 100
+    batch_evaluation_steps: int = 50
+    state_dim: int = 6  # Fixed to match 6-dimensional state space
+    action_dim: int = 3
+    hidden_dim: int = 64
+
+class QNetwork(nn.Module):
+    """Q-Network for DQN agent."""
+    
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, action_dim)
+        self.relu = nn.ReLU()
+        
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        return self.fc3(x)
+
+class PPONetwork(nn.Module):
+    """Actor-Critic network for PPO reward optimizer."""
+    
+    def __init__(self, state_dim: int, hidden_dim: int = 64):
+        super(PPONetwork, self).__init__()
+        # Actor (policy) network
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),  # Output reward modulation factor
+            nn.Tanh()  # Bound between -1 and 1
+        )
+        
+        # Critic (value) network
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        
+    def forward(self, x):
+        return self.actor(x), self.critic(x)
+
+class ReplayBuffer:
+    """Experience replay buffer for DQN."""
+    
+    def __init__(self, capacity: int):
+        self.buffer = deque(maxlen=capacity)
+        
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+        
+    def sample(self, batch_size: int):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = zip(*batch)
+        return (np.array(state), np.array(action), np.array(reward), 
+                np.array(next_state), np.array(done))
+        
+    def __len__(self):
+        return len(self.buffer)
+
+class DQNAgent:
+    """DQN agent for discrete scaling actions."""
+    
+    def __init__(self, config: HybridConfig):
+        self.config = config
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Networks
+        self.q_network = QNetwork(config.state_dim, config.action_dim, config.hidden_dim).to(self.device)
+        self.target_network = QNetwork(config.state_dim, config.action_dim, config.hidden_dim).to(self.device)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        
+        # Optimizer
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=config.dqn_learning_rate)
+        
+        # Replay buffer
+        self.replay_buffer = ReplayBuffer(config.dqn_buffer_size)
+        
+        # Exploration
+        self.epsilon = config.dqn_epsilon_start
+        self.steps = 0
+        
+        logger.info("DQN Agent initialized")
+        
+    def select_action(self, state: np.ndarray, training: bool = True) -> int:
+        """Select action using epsilon-greedy policy."""
+        if training and random.random() < self.epsilon:
+            return random.randint(0, self.config.action_dim - 1)
+        
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            q_values = self.q_network(state_tensor)
+            return q_values.argmax().item()
+    
+    def update(self, batch_size: int) -> float:
+        """Update Q-network using experience replay."""
+        if len(self.replay_buffer) < batch_size:
+            return 0.0
+            
+        states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
+        
+        states = torch.FloatTensor(states).to(self.device)
+        actions = torch.LongTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        next_states = torch.FloatTensor(next_states).to(self.device)
+        dones = torch.BoolTensor(dones).to(self.device)
+        
+        # Current Q values
+        current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
+        
+        # Next Q values
+        with torch.no_grad():
+            next_q_values = self.target_network(next_states).max(1)[0]
+            target_q_values = rewards + (self.config.dqn_gamma * next_q_values * ~dones)
+        
+        # Loss
+        loss = nn.MSELoss()(current_q_values.squeeze(), target_q_values)
+        
+        # Optimize
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        # Update target network
+        if self.steps % self.config.dqn_target_update_freq == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+            
+        # Decay epsilon
+        self.epsilon = max(self.config.dqn_epsilon_end, 
+                          self.epsilon * self.config.dqn_epsilon_decay)
+        
+        self.steps += 1
+        return loss.item()
+    
+    def save(self, path: str):
+        """Save DQN model."""
+        torch.save({
+            'q_network_state_dict': self.q_network.state_dict(),
+            'target_network_state_dict': self.target_network.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epsilon': self.epsilon,
+            'steps': self.steps
+        }, path)
+        
+    def load(self, path: str):
+        """Load DQN model."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.q_network.load_state_dict(checkpoint['q_network_state_dict'])
+        self.target_network.load_state_dict(checkpoint['target_network_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.epsilon = checkpoint['epsilon']
+        self.steps = checkpoint['steps']
+
+class PPORewardOptimizer:
+    """PPO agent for optimizing reward signals."""
+    
+    def __init__(self, config: HybridConfig):
+        self.config = config
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Network
+        self.network = PPONetwork(config.state_dim, config.hidden_dim).to(self.device)
+        
+        # Optimizer
+        self.optimizer = optim.Adam(self.network.parameters(), lr=config.ppo_learning_rate)
+        
+        # Bayesian optimizer for reward function tuning
+        # Define parameter bounds for reward function optimization
+        param_bounds = {
+            'latency_weight': (0.1, 0.8),
+            'cpu_weight': (0.1, 0.5),
+            'memory_weight': (0.05, 0.3),
+            'cost_weight': (0.05, 0.3),
+            'throughput_weight': (0.01, 0.2),
+            'latency_threshold': (0.1, 0.5),
+            'cpu_threshold': (0.5, 0.9),
+            'cost_threshold': (0.6, 0.95)
+        }
+        self.bayesian_optimizer = BayesianOptimizer(param_bounds)
+        
+        # Metrics tracking
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.latency_history = []
+        self.throughput_history = []
+        self.cost_history = []
+        self.queue_length_history = []
+        
+        logger.info("PPO Reward Optimizer initialized")
+        
+    def optimize_reward(self, state: np.ndarray, base_reward: float, 
+                       metrics: Dict[str, float]) -> float:
+        """Optimize reward using PPO and Bayesian optimization."""
+        # Get reward modulation from PPO network
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            reward_modulation, _ = self.network(state_tensor)
+            reward_modulation = reward_modulation.item()
+        
+        # Bayesian optimization for reward function parameters
+        # Use the suggest method to get optimized parameters
+        reward_params = self.bayesian_optimizer.suggest()
+        
+        # Calculate optimized reward
+        optimized_reward = self._calculate_optimized_reward(
+            base_reward, reward_modulation, metrics, reward_params
+        )
+        
+        return optimized_reward
+    
+    def _calculate_optimized_reward(self, base_reward: float, modulation: float,
+                                  metrics: Dict[str, float], params: Dict[str, float]) -> float:
+        """Calculate optimized reward using multiple factors."""
+        latency = metrics.get('latency', 0.0)
+        throughput = metrics.get('throughput', 0.0)
+        cost = metrics.get('cost', 0.0)
+        queue_length = metrics.get('queue_length', 0.0)
+        
+        # Base reward with modulation
+        reward = base_reward * (1 + modulation)
+        
+        # Latency penalty
+        if latency > params.get('latency_threshold', 0.3):
+            reward -= params.get('latency_penalty', 1.0) * (latency - params.get('latency_threshold', 0.3))
+        
+        # Throughput bonus
+        if throughput > params.get('throughput_threshold', 0.7):
+            reward += params.get('throughput_bonus', 0.5)
+        
+        # Cost penalty
+        if cost > params.get('cost_threshold', 0.8):
+            reward -= params.get('cost_penalty', 0.3) * cost
+        
+        # Queue length penalty
+        if queue_length > params.get('queue_threshold', 0.5):
+            reward -= params.get('queue_penalty', 0.2) * queue_length
+        
+        return reward
+    
+    def update(self, states: List[np.ndarray], actions: List[int], 
+               rewards: List[float], next_states: List[np.ndarray], 
+               dones: List[bool]) -> float:
+        """Update PPO network using collected experience."""
+        if len(states) < self.config.ppo_batch_size:
+            return 0.0
+            
+        # Convert to tensors
+        states_tensor = torch.FloatTensor(states).to(self.device)
+        rewards_tensor = torch.FloatTensor(rewards).to(self.device)
+        
+        # Forward pass
+        reward_modulations, values = self.network(states_tensor)
+        
+        # Calculate loss (simplified PPO loss)
+        loss = nn.MSELoss()(values.squeeze(), rewards_tensor)
+        
+        # Optimize
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        return loss.item()
+    
+    def update_metrics(self, episode_reward: float, episode_length: int,
+                      metrics: Dict[str, float]):
+        """Update metrics for reward optimization."""
+        self.episode_rewards.append(episode_reward)
+        self.episode_lengths.append(episode_length)
+        self.latency_history.append(metrics.get('latency', 0.0))
+        self.throughput_history.append(metrics.get('throughput', 0.0))
+        self.cost_history.append(metrics.get('cost', 0.0))
+        self.queue_length_history.append(metrics.get('queue_length', 0.0))
+        
+        # Keep only recent history
+        max_history = 1000
+        if len(self.episode_rewards) > max_history:
+            self.episode_rewards = self.episode_rewards[-max_history:]
+            self.episode_lengths = self.episode_lengths[-max_history:]
+            self.latency_history = self.latency_history[-max_history:]
+            self.throughput_history = self.throughput_history[-max_history:]
+            self.cost_history = self.cost_history[-max_history:]
+            self.queue_length_history = self.queue_length_history[-max_history:]
+    
+    def save(self, path: str):
+        """Save PPO model."""
+        torch.save({
+            'network_state_dict': self.network.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'episode_rewards': self.episode_rewards,
+            'latency_history': self.latency_history,
+            'throughput_history': self.throughput_history,
+            'cost_history': self.cost_history,
+            'queue_length_history': self.queue_length_history
+        }, path)
+        
+    def load(self, path: str):
+        """Load PPO model."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.network.load_state_dict(checkpoint['network_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.episode_rewards = checkpoint.get('episode_rewards', [])
+        self.latency_history = checkpoint.get('latency_history', [])
+        self.throughput_history = checkpoint.get('throughput_history', [])
+        self.cost_history = checkpoint.get('cost_history', [])
+        self.queue_length_history = checkpoint.get('queue_length_history', [])
+
+class HybridDQNPPOAgent:
+    """Hybrid DQN-PPO agent for adaptive autoscaling."""
+    
+    def __init__(self, config: HybridConfig, k8s_api: KubernetesAPI, mock_mode: bool = False):
+        self.config = config
+        self.k8s_api = k8s_api
+        self.mock_mode = mock_mode
+        
+        # Initialize agents
+        self.dqn_agent = DQNAgent(config)
+        self.ppo_optimizer = PPORewardOptimizer(config)
+        
+        # Training state
+        self.total_steps = 0
+        self.episode_count = 0
+        self.current_episode_reward = 0.0
+        self.current_episode_length = 0
+        
+        # Metrics tracking
+        self.metrics_callback = AutoscalingMetricsCallback()
+        
+        # Initialize WandB
+        self._init_wandb()
+        
+        logger.info("Hybrid DQN-PPO Agent initialized")
+        
+    def _init_wandb(self):
+        """Initialize WandB for experiment tracking."""
+        try:
+            wandb.init(
+                project="microk8s_hybrid_autoscaling",
+                name=f"hybrid_dqn_ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                config={
+                    "algorithm": "Hybrid DQN-PPO",
+                    "dqn_learning_rate": self.config.dqn_learning_rate,
+                    "ppo_learning_rate": self.config.ppo_learning_rate,
+                    "dqn_buffer_size": self.config.dqn_buffer_size,
+                    "ppo_n_steps": self.config.ppo_n_steps,
+                    "reward_optimization_freq": self.config.reward_optimization_freq,
+                    "batch_evaluation_steps": self.config.batch_evaluation_steps
+                },
+                tags=["hybrid", "autoscaling", "DQN", "PPO"],
+                sync_tensorboard=True
+            )
+        except Exception as e:
+            logger.warning(f"WandB initialization failed: {e}")
+    
+    def get_state(self) -> np.ndarray:
+        """Get current cluster state."""
+        if self.mock_mode:
+            # Return mock state for testing
+            return np.array([
+                np.random.uniform(0.1, 0.8),  # CPU
+                np.random.uniform(0.1, 0.7),  # Memory
+                np.random.uniform(0.05, 0.3),  # Latency
+                np.random.uniform(0.2, 0.6),  # Pods
+                np.random.uniform(0.0, 0.2),  # Queue length
+                np.random.uniform(0.5, 0.9)   # Throughput
+            ], dtype=np.float32)
+        
+        try:
+            cluster_state = self.k8s_api.get_cluster_state()
+            state = np.array([
+                min(cluster_state["cpu"] / 100.0, 1.0),
+                min(cluster_state["memory"] / 1e9, 1.0),
+                min(cluster_state["latency"] / 0.2, 1.0),
+                min(cluster_state["pods"] / self.k8s_api.max_pods, 1.0),
+                0.0,  # Queue length (placeholder)
+                0.8   # Throughput (placeholder)
+            ], dtype=np.float32)
+            return state
+        except Exception as e:
+            logger.error(f"Failed to get cluster state: {e}")
+            return np.zeros(self.config.state_dim, dtype=np.float32)
+    
+    def execute_action(self, action: int) -> Dict[str, Any]:
+        """Execute scaling action and return metrics."""
+        if self.mock_mode:
+            # Mock action execution for testing
+            current_replicas = 3  # Mock current replicas
+            if action == 0:  # Scale up
+                new_replicas = min(current_replicas + 1, self.k8s_api.max_pods)
+            elif action == 1:  # Scale down
+                new_replicas = max(current_replicas - 1, 1)
+            else:  # No change
+                new_replicas = current_replicas
+            
+            # Mock metrics
+            metrics = {
+                'latency': np.random.uniform(0.05, 0.3),
+                'throughput': np.random.uniform(0.6, 0.9),
+                'cost': new_replicas / self.k8s_api.max_pods,
+                'queue_length': np.random.uniform(0.0, 0.2)
+            }
+            
+            return {
+                'action': action,
+                'replicas': new_replicas,
+                'metrics': metrics,
+                'cluster_state': {}
+            }
+        
+        try:
+            current_replicas = self.k8s_api._get_current_replicas("nginx-deployment")
+            
+            if action == 0:  # Scale up
+                new_replicas = min(current_replicas + 1, self.k8s_api.max_pods)
+                self.k8s_api.safe_scale("nginx-deployment", new_replicas)
+            elif action == 1:  # Scale down
+                new_replicas = max(current_replicas - 1, 1)
+                self.k8s_api.safe_scale("nginx-deployment", new_replicas)
+            # action == 2: No change
+            
+            # Wait for scaling to take effect
+            import time
+            time.sleep(5)
+            
+            # Get updated metrics
+            cluster_state = self.k8s_api.get_cluster_state()
+            metrics = {
+                'latency': cluster_state.get('latency', 0.0) / 0.2,  # Normalized
+                'throughput': 1.0 - cluster_state.get('cpu', 0.0) / 100.0,  # Inverse of CPU
+                'cost': cluster_state.get('pods', 0.0) / self.k8s_api.max_pods,
+                'queue_length': max(0.0, cluster_state.get('latency', 0.0) - 0.1) / 0.1
+            }
+            
+            return {
+                'action': action,
+                'replicas': new_replicas,
+                'metrics': metrics,
+                'cluster_state': cluster_state
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to execute action: {e}")
+            try:
+                current_replicas = self.k8s_api._get_current_replicas("nginx-deployment")
+            except:
+                current_replicas = 1
+            return {
+                'action': action,
+                'replicas': current_replicas,
+                'metrics': {'latency': 1.0, 'throughput': 0.0, 'cost': 1.0, 'queue_length': 1.0},
+                'cluster_state': {}
+            }
+    
+    def calculate_base_reward(self, prev_state: np.ndarray, current_state: np.ndarray) -> float:
+        """Calculate base reward from state transition."""
+        # Ensure we have the right number of state dimensions
+        if len(current_state) >= 4:
+            cpu, memory, latency, pods = current_state[:4]
+        else:
+            # Fallback for smaller state spaces
+            cpu, memory, latency, pods = current_state[0], current_state[1], current_state[2], 0.0
+        
+        reward = 0.0
+        
+        # Performance rewards
+        if latency < 0.3:
+            reward += 1.0
+        elif latency < 0.6:
+            reward += 0.5
+        else:
+            reward -= 1.0
+        
+        # Resource penalties
+        if cpu > 0.85:
+            reward -= 0.7
+        elif cpu > 0.7:
+            reward -= 0.4
+        
+        # Cost penalties
+        if pods > 0.8:
+            reward -= 0.5
+        
+        # Scaling efficiency
+        if len(prev_state) >= 4 and prev_state[3] > pods:  # Pods decreased
+            if cpu < prev_state[0] and latency < prev_state[2]:
+                reward += 0.5
+        
+        return reward
+    
+    def step(self) -> Dict[str, Any]:
+        """Execute one step of the hybrid agent."""
+        # Get current state
+        current_state = self.get_state()
+        
+        # Select action using DQN
+        action = self.dqn_agent.select_action(current_state, training=True)
+        
+        # Execute action
+        result = self.execute_action(action)
+        
+        # Get next state
+        next_state = self.get_state()
+        
+        # Calculate base reward
+        base_reward = self.calculate_base_reward(current_state, next_state)
+        
+        # Optimize reward using PPO
+        optimized_reward = self.ppo_optimizer.optimize_reward(
+            current_state, base_reward, result['metrics']
+        )
+        
+        # Store experience in DQN replay buffer
+        done = self._is_episode_done(next_state)
+        self.dqn_agent.replay_buffer.push(
+            current_state, action, optimized_reward, next_state, done
+        )
+        
+        # Update episode tracking
+        self.current_episode_reward += optimized_reward
+        self.current_episode_length += 1
+        self.total_steps += 1
+        
+        # Update PPO metrics
+        self.ppo_optimizer.update_metrics(
+            self.current_episode_reward, self.current_episode_length, result['metrics']
+        )
+        
+        # Log metrics
+        self._log_metrics(action, optimized_reward, result['metrics'])
+        
+        # Check if episode is done
+        if done:
+            self._end_episode()
+        
+        # Periodic updates
+        if self.total_steps % 10 == 0:  # Update DQN every 10 steps
+            dqn_loss = self.dqn_agent.update(self.config.dqn_batch_size)
+            if dqn_loss > 0:
+                wandb.log({"dqn/loss": dqn_loss, "train/global_step": self.total_steps})
+        
+        if self.total_steps % self.config.reward_optimization_freq == 0:
+            ppo_loss = self.ppo_optimizer.update(
+                [current_state], [action], [optimized_reward], [next_state], [done]
+            )
+            if ppo_loss > 0:
+                wandb.log({"ppo/loss": ppo_loss, "train/global_step": self.total_steps})
+        
+        return {
+            'state': current_state,
+            'action': action,
+            'reward': optimized_reward,
+            'next_state': next_state,
+            'done': done,
+            'metrics': result['metrics']
+        }
+    
+    def _is_episode_done(self, state: np.ndarray) -> bool:
+        """Check if episode should end."""
+        return state[2] > 0.95 or state[3] >= 0.95  # High latency or max pods
+    
+    def _end_episode(self):
+        """Handle episode end."""
+        self.episode_count += 1
+        
+        # Log episode metrics
+        wandb.log({
+            "episode/reward": self.current_episode_reward,
+            "episode/length": self.current_episode_length,
+            "episode/count": self.episode_count,
+            "train/global_step": self.total_steps
+        })
+        
+        # Reset episode tracking
+        self.current_episode_reward = 0.0
+        self.current_episode_length = 0
+        
+        logger.info(f"Episode {self.episode_count} completed")
+    
+    def _log_metrics(self, action: int, reward: float, metrics: Dict[str, float]):
+        """Log metrics to WandB."""
+        wandb.log({
+            "actions/scale_up": 1 if action == 0 else 0,
+            "actions/scale_down": 1 if action == 1 else 0,
+            "actions/no_change": 1 if action == 2 else 0,
+            "rewards/optimized": reward,
+            "metrics/latency": metrics['latency'],
+            "metrics/throughput": metrics['throughput'],
+            "metrics/cost": metrics['cost'],
+            "metrics/queue_length": metrics['queue_length'],
+            "train/global_step": self.total_steps
+        })
+    
+    def train(self, total_steps: int = 50000):
+        """Train the hybrid agent."""
+        logger.info(f"Starting training for {total_steps} steps")
+        
+        try:
+            while self.total_steps < total_steps:
+                step_result = self.step()
+                
+                # Periodic evaluation
+                if self.total_steps % 1000 == 0:
+                    self._evaluate()
+                
+                # Periodic checkpointing
+                if self.total_steps % 5000 == 0:
+                    self.save_models()
+                
+        except KeyboardInterrupt:
+            logger.info("Training interrupted by user")
+        except Exception as e:
+            logger.error(f"Training failed: {e}")
+            raise
+        finally:
+            self.save_models()
+            wandb.finish()
+    
+    def _evaluate(self):
+        """Evaluate agent performance."""
+        logger.info(f"Evaluating at step {self.total_steps}")
+        
+        # Run evaluation episodes
+        eval_rewards = []
+        for _ in range(5):
+            episode_reward = 0.0
+            state = self.get_state()
+            
+            for _ in range(100):  # Max 100 steps per eval episode
+                action = self.dqn_agent.select_action(state, training=False)
+                result = self.execute_action(action)
+                next_state = self.get_state()
+                
+                base_reward = self.calculate_base_reward(state, next_state)
+                optimized_reward = self.ppo_optimizer.optimize_reward(
+                    state, base_reward, result['metrics']
+                )
+                
+                episode_reward += optimized_reward
+                state = next_state
+                
+                if self._is_episode_done(state):
+                    break
+            
+            eval_rewards.append(episode_reward)
+        
+        avg_reward = np.mean(eval_rewards)
+        wandb.log({
+            "eval/mean_reward": avg_reward,
+            "eval/std_reward": np.std(eval_rewards),
+            "train/global_step": self.total_steps
+        })
+        
+        logger.info(f"Evaluation: mean reward = {avg_reward:.2f}")
+    
+    def save_models(self, path: str = "./models/hybrid"):
+        """Save both DQN and PPO models."""
+        try:
+            os.makedirs(path, exist_ok=True)
+            
+            self.dqn_agent.save(f"{path}/dqn_model.pth")
+            self.ppo_optimizer.save(f"{path}/ppo_model.pth")
+            
+            logger.info(f"Models saved to {path}")
+        except Exception as e:
+            logger.error(f"Failed to save models: {e}")
+            # Try saving to current directory as fallback
+            try:
+                self.dqn_agent.save("dqn_model.pth")
+                self.ppo_optimizer.save("ppo_model.pth")
+                logger.info("Models saved to current directory as fallback")
+            except Exception as e2:
+                logger.error(f"Failed to save models even to current directory: {e2}")
+    
+    def load_models(self, path: str = "./models/hybrid"):
+        """Load both DQN and PPO models."""
+        try:
+            self.dqn_agent.load(f"{path}/dqn_model.pth")
+            self.ppo_optimizer.load(f"{path}/ppo_model.pth")
+            logger.info(f"Models loaded from {path}")
+        except Exception as e:
+            logger.error(f"Failed to load models: {e}")
+    
+    def get_scaling_decision(self, state: np.ndarray) -> int:
+        """Get scaling decision for current state (for inference)."""
+        return self.dqn_agent.select_action(state, training=False) 

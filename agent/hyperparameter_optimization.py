@@ -1,6 +1,6 @@
 import optuna
 import logging
-from typing import Dict, Any, Type, List
+from typing import Dict, Any, Type
 import wandb
 import pandas as pd
 import numpy as np

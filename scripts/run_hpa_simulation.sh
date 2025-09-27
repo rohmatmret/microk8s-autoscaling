@@ -154,8 +154,8 @@ kubectl apply -f config/nginx-config.yaml
 print_status "Applying nginx deployment..."
 kubectl apply -f deployments/nginx-deployment.yaml
 
-# Wait for nginx deployment
-wait_for_deployment "nginx"
+# Wait for nginx deployment  
+wait_for_deployment "nginx-deployment"
 
 # Apply HPA
 print_status "Applying Horizontal Pod Autoscaler..."
@@ -284,7 +284,7 @@ echo ""
 print_status "Useful commands for further investigation:"
 echo "  kubectl get hpa -w                    # Watch HPA in real-time"
 echo "  kubectl top pods                      # View resource usage"
-echo "  kubectl logs -f deployment/nginx      # View nginx logs"
+echo "  kubectl logs -f deployment/nginx-deployment      # View nginx logs"
 echo "  kubectl describe hpa nginx-hpa        # Detailed HPA information"
 echo "  kubectl get events --sort-by=.metadata.creationTimestamp  # View events"
 echo ""
@@ -292,7 +292,7 @@ print_status "To clean up the deployment, run:"
 echo "  kubectl delete -f deployments/nginx-hpa.yaml"
 echo "  kubectl delete -f deployments/ingres.yaml"
 echo "  kubectl delete -f deployments/nginx-controller-service.yaml"
-echo "  kubectl delete deployment nginx"
+echo "  kubectl delete deployment nginx-deployment"
 echo "  kubectl delete service nginx"
 echo "  kubectl delete configmap nginx-config"
 echo "  kubectl delete configmap k6-load-script"

@@ -22,6 +22,7 @@ import time
 from kubernetes import client, config
 from prometheus_api_client import PrometheusConnect
 from agent.metrics_callback import AutoscalingMetricsCallback
+from agent.hyperparameter_optimization import optimize_hyperparameters
 
 # Configure logging
 logging.basicConfig(
@@ -49,18 +50,23 @@ class VisualizationCallback(BaseCallback):
             try:
                 # Resource Utilization Dashboard
                 state = self.env.api.get_cluster_state()
-                wandb.log({
-                    "resources/cpu": state["cpu"],
-                    "resources/memory": state["memory"]/500e6,
-                    "resources/swap": state["swap"]/200e6,
-                    "resources/latency": state["latency"],
-                    "scaling/pod_count": state["pods"],
-                    "scaling/desired_pods": state["desired_replicas"],
-                    "scaling/lag": state["desired_replicas"] - state["pods"],
+                metrics = {
+                    "resources/cpu": state.get("cpu", 0),
+                    "resources/memory": state.get("memory", 0)/500e6,
+                    "resources/latency": state.get("latency", 0),
+                    "scaling/pod_count": state.get("pods", 0),
+                    "scaling/desired_pods": state.get("desired_replicas", 0),
+                    "scaling/lag": state.get("desired_replicas", 0) - state.get("pods", 0),
                     "train/global_step": self.num_timesteps
-                })
+                }
+                
+                # Add swap metric if available
+                if "swap" in state:
+                    metrics["resources/swap"] = state["swap"]/200e6
+                
+                wandb.log(metrics)
             except Exception as e:
-                logger.warning("Failed to log visualization metrics: %s ",str(e))
+                logger.warning("Failed to log visualization metrics: %s", str(e))
         return True
     
 class CustomEvalCallback(EvalCallback):
@@ -212,6 +218,17 @@ class PPOAgent:
 
     def _initialize_wandb(self, learning_rate: float, gamma: float, n_steps: int, batch_size: int):
         """Initializes Weights & Biases for experiment tracking."""
+        """
+        {   
+            'learning_rate': 1.2927569851281251e-05, 
+            'n_steps': 4054, 'batch_size': 130, 
+            'gamma': 0.9612252227440067, 
+            'gae_lambda': 0.9578672476684433, 
+            'clip_range': 0.1748093648548033, 
+            'ent_coef': 0.078602094413419, 
+            'vf_coef': 0.6888043824647134
+        }
+        """
         wandb.init(
             project="microk8s_rl_autoscaling",
             resume="allow",
@@ -538,14 +555,30 @@ if __name__ == "__main__":
     else:
         env = MicroK8sEnv()  # Your real environment
         print("Using REAL environment")
-    # Initialize and train agent
-    agent = PPOAgent(env)
     
-    agent.load()
-
+    # Optimize hyperparameters
+    best_params = optimize_hyperparameters(
+        env=env,
+        agent_class=PPOAgent,
+        n_trials=20,
+        eval_episodes=args.eval_episodes,
+        timesteps_per_trial=10000,
+        study_name="ppo_optimization"
+    )
+    
+    # Initialize and train agent with best parameters
+    agent = PPOAgent(
+        environment=env,
+        learning_rate=best_params["learning_rate"],
+        n_steps=best_params["n_steps"],
+        batch_size=best_params["batch_size"],
+        gamma=best_params["gamma"]
+    )
+    
     agent.train(
         total_timesteps=args.timesteps,
         eval_episodes=args.eval_episodes
     )
+    
     # Final evaluation
     agent.evaluate(episodes=args.eval_episodes)
