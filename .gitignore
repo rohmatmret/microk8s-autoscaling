@@ -179,3 +179,7 @@ cython_debug/
 venv/
 dqn_tensorboard/
 ppo_tensorboard/
+
+
+metrics/*
+test_results/*

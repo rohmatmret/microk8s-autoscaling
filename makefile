@@ -97,3 +97,10 @@ train-simulation: check-sudo
 # Alias for start-simulation
 .PHONY: train
 start: train-simulation
+
+
+.PHONY: deploy-hpa clean load-test
+
+# Deploy all components
+deploy-hpa:
+	@bash scripts/run_hpa_simulation.sh

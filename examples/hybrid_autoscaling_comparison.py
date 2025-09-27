@@ -8,8 +8,7 @@ import os
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.traffic_simulation import TrafficSimulator
-from agent.hybird_simulation import HybridTrafficSimulator
+from agent.traffic_simulation import TrafficSimulator, HybridTrafficSimulator
 
 def compare_hybrid_autoscaling():
     """Compare and visualize hybrid traffic patterns with autoscaling behavior."""
