@@ -27,12 +27,22 @@ class ResearchReportGenerator:
         self.report_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def load_latest_results(self) -> Optional[Dict[str, Any]]:
-        """Load the most recent test results."""
+        """Load the most recent test results from multiple possible locations."""
         try:
-            # Find the most recent JSON results file
-            json_files = list(self.results_dir.glob("performance_study_*.json"))
+            # Search in multiple locations: results_dir, project root, and current directory
+            search_paths = [
+                self.results_dir,
+                Path.cwd(),  # Current working directory (project root)
+                Path.cwd().parent  # Parent directory
+            ]
+
+            json_files = []
+            for search_path in search_paths:
+                json_files.extend(search_path.glob("performance_study_*.json"))
+
             if not json_files:
-                print("No performance study results found")
+                print("No performance study results found in any location")
+                print(f"Searched in: {[str(p) for p in search_paths]}")
                 return None
 
             latest_file = max(json_files, key=os.path.getctime)
@@ -64,11 +74,10 @@ class ResearchReportGenerator:
 
     def calculate_statistical_significance(self, data: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
         """Calculate statistical significance between agents."""
-        from scipy import stats
-
         significance_results = {}
 
         try:
+            from scipy import stats
             # Extract performance metrics for each agent
             agent_metrics = {}
             for agent, scenarios in data['results'].items():
@@ -110,8 +119,193 @@ class ResearchReportGenerator:
 
         return significance_results
 
+    def generate_detailed_cost_analysis(self, data: Dict[str, Any]) -> str:
+        """Generate detailed cost analysis by scenario and agent."""
+        if 'results' not in data:
+            return "No detailed cost data available"
+
+        cost_analysis = []
+        cost_analysis.append("## Detailed Cost Analysis\n")
+
+        # Extract cost progression data
+        cost_analysis.append("### Cost Calculation Methodology")
+        cost_analysis.append("The cost is calculated based on **cumulative pod usage over time** using the following validated formula:")
+        cost_analysis.append("```")
+        cost_analysis.append("Cost = Σ(pod_count[i] × cost_per_step) for all steps i")
+        cost_analysis.append("Base cost per pod: $0.1 per pod per simulation step")
+        cost_analysis.append("Source: hybrid_traffic_simulation.py:465")
+        cost_analysis.append("```")
+        cost_analysis.append("")
+        cost_analysis.append("#### Scaling Behavior Impact")
+        cost_analysis.append("Different scaling behaviors directly impact total costs:")
+        cost_analysis.append("")
+        cost_analysis.append("**Example Cost Calculation:**")
+        cost_analysis.append("- Steps 1-100: 3 pods × $0.1 × 100 steps = $30")
+        cost_analysis.append("- Steps 101-500: 5 pods × $0.1 × 400 steps = $200")
+        cost_analysis.append("- Steps 501-1000: 8 pods × $0.1 × 500 steps = $400")
+        cost_analysis.append("- **Total Cost: $630**")
+        cost_analysis.append("")
+        cost_analysis.append("**Agent Cost Impact Patterns:**")
+        cost_analysis.append("- **Aggressive Scalers**: Higher short-term costs, better SLA compliance")
+        cost_analysis.append("- **Conservative Scalers**: Lower immediate costs, risk of SLA violations")
+        cost_analysis.append("- **RL Agents**: Optimized scaling reduces unnecessary pod-hours")
+        cost_analysis.append("- **Rule-based**: Static thresholds may cause over/under-provisioning\n")
+
+        # Analyze cost by scenario
+        cost_analysis.append("### Cost Breakdown by Test Scenario\n")
+
+        for agent, scenarios in data['results'].items():
+            cost_analysis.append(f"#### {agent.replace('_', ' ').title()} Agent")
+            cost_analysis.append("| Scenario | Duration | Pod Range | Cost Range | Pattern |")
+            cost_analysis.append("|----------|----------|-----------|------------|---------|")
+
+            for scenario_name, metrics_list in scenarios.items():
+                if metrics_list:
+                    # Get scenario characteristics
+                    duration = len(metrics_list)
+                    pod_counts = [m['pod_count'] for m in metrics_list]
+                    costs = [m['resource_cost'] for m in metrics_list]
+
+                    min_pods, max_pods = min(pod_counts), max(pod_counts)
+                    min_cost, max_cost = min(costs), max(costs)
+
+                    # Determine cost pattern
+                    if max_cost > min_cost * 5:
+                        pattern = "High escalation"
+                    elif max_cost > min_cost * 2:
+                        pattern = "Moderate growth"
+                    else:
+                        pattern = "Stable costs"
+
+                    cost_analysis.append(
+                        f"| **{scenario_name.replace('_', ' ').title()}** | "
+                        f"{duration} steps | {min_pods}-{max_pods} pods | "
+                        f"${min_cost:.2f}-${max_cost:.2f} | {pattern} |"
+                    )
+
+            cost_analysis.append("")
+
+        # Cost efficiency analysis
+        cost_analysis.append("### Cost Efficiency Insights\n")
+
+        if 'analysis' in data and 'agent_comparison' in data['analysis']:
+            agent_comparison = data['analysis']['agent_comparison']
+
+            for agent, metrics in agent_comparison.items():
+                cost_per_pod = metrics['total_cost'] / metrics['avg_pod_count'] if metrics['avg_pod_count'] > 0 else 0
+                cpu_efficiency = metrics['avg_cpu_utilization']
+
+                cost_analysis.append(f"**{agent.replace('_', ' ').title()}**:")
+                cost_analysis.append(f"- Average cost per pod: ${cost_per_pod:.2f}")
+                cost_analysis.append(f"- CPU utilization efficiency: {cpu_efficiency:.1%}")
+
+                if cpu_efficiency < 0.5:
+                    cost_analysis.append(f"  ⚠️ *Over-provisioning detected - wasted resources*")
+                elif cpu_efficiency > 0.9:
+                    cost_analysis.append(f"  ⚠️ *Under-provisioning risk - potential SLA violations*")
+                else:
+                    cost_analysis.append(f"  ✅ *Optimal resource utilization*")
+
+                cost_analysis.append("")
+
+        return "\n".join(cost_analysis)
+
+    def generate_traffic_load_analysis(self, data: Dict[str, Any]) -> str:
+        """Generate detailed traffic load analysis."""
+        traffic_analysis = []
+        traffic_analysis.append("### Traffic Load Patterns\n")
+
+        # Define scenario characteristics
+        scenario_specs = {
+            'baseline_steady': {'base': '500 RPS', 'max': '800 RPS', 'pattern': 'Stable baseline load'},
+            'gradual_ramp': {'base': '200 RPS', 'max': '1000 RPS', 'pattern': 'Progressive load increase'},
+            'sudden_spike': {'base': '400 RPS', 'max': '2000 RPS', 'pattern': 'Flash crowd events'},
+            'flash_crowd': {'base': '300 RPS', 'max': '3000 RPS', 'pattern': 'Extreme traffic bursts'},
+            'daily_pattern': {'base': '100 RPS', 'max': '400 RPS', 'pattern': 'Realistic daily usage'}
+        }
+
+        traffic_analysis.append("| Test Scenario | Base Load | Max Load | Duration | Pattern Description |")
+        traffic_analysis.append("|---------------|-----------|----------|----------|---------------------|")
+
+        for scenario, specs in scenario_specs.items():
+            # Try to get actual duration from data
+            duration = "Variable"
+            if 'results' in data:
+                for agent_data in data['results'].values():
+                    if scenario in agent_data and agent_data[scenario]:
+                        duration = f"{len(agent_data[scenario])} steps"
+                        break
+
+            traffic_analysis.append(
+                f"| **{scenario.replace('_', ' ').title()}** | "
+                f"{specs['base']} | {specs['max']} | {duration} | {specs['pattern']} |"
+            )
+
+        traffic_analysis.append("\n### Load Generation Components")
+        traffic_analysis.append("Traffic simulation includes multiple realistic components:")
+        traffic_analysis.append("- **Daily Variation**: `base_load × 0.5 × sin(2π × step / 1440)` - Natural daily fluctuation")
+        traffic_analysis.append("- **Weekly Pattern**: Weekdays 100%, Weekend 30-40% - Lower weekend traffic")
+        traffic_analysis.append("- **Random Spikes**: 0.5-2% probability per step, 2x-30x intensity - Unexpected bursts")
+        traffic_analysis.append("- **Scheduled Events**: Pre-defined high-traffic periods (conferences, sales, etc.)")
+        traffic_analysis.append("- **Gaussian Noise**: ±5% random variation for realism\n")
+
+        return "\n".join(traffic_analysis)
+
+    def generate_scaling_behavior_analysis(self, data: Dict[str, Any]) -> str:
+        """Generate detailed scaling behavior analysis."""
+        if 'results' not in data:
+            return "No scaling behavior data available"
+
+        scaling_analysis = []
+        scaling_analysis.append("### Scaling Behavior Analysis\n")
+
+        for agent, scenarios in data['results'].items():
+            scaling_analysis.append(f"#### {agent.replace('_', ' ').title()} Agent")
+
+            total_scale_ups = 0
+            total_scale_downs = 0
+            total_no_changes = 0
+            scaling_frequencies = []
+
+            for scenario_name, metrics_list in scenarios.items():
+                if metrics_list:
+                    # Aggregate scaling actions
+                    for metric in metrics_list:
+                        actions = metric.get('action_distribution', {})
+                        total_scale_ups += actions.get('scale_up', 0)
+                        total_scale_downs += actions.get('scale_down', 0)
+                        total_no_changes += actions.get('no_change', 0)
+
+                        if 'scaling_frequency' in metric:
+                            scaling_frequencies.append(metric['scaling_frequency'])
+
+            total_actions = total_scale_ups + total_scale_downs + total_no_changes
+
+            if total_actions > 0:
+                scaling_analysis.append(f"**Action Distribution**:")
+                scaling_analysis.append(f"- Scale Up: {total_scale_ups} ({total_scale_ups/total_actions:.1%})")
+                scaling_analysis.append(f"- Scale Down: {total_scale_downs} ({total_scale_downs/total_actions:.1%})")
+                scaling_analysis.append(f"- No Change: {total_no_changes} ({total_no_changes/total_actions:.1%})")
+
+                if scaling_frequencies:
+                    avg_freq = np.mean(scaling_frequencies)
+                    scaling_analysis.append(f"- Average Scaling Frequency: {avg_freq:.1f} actions/hour")
+
+                # Analyze scaling aggressiveness
+                scale_ratio = (total_scale_ups + total_scale_downs) / total_actions
+                if scale_ratio > 0.6:
+                    scaling_analysis.append(f"  📈 *Aggressive scaling behavior - high responsiveness*")
+                elif scale_ratio > 0.3:
+                    scaling_analysis.append(f"  ⚖️ *Balanced scaling behavior - moderate adjustments*")
+                else:
+                    scaling_analysis.append(f"  🔒 *Conservative scaling behavior - stable operation*")
+
+            scaling_analysis.append("")
+
+        return "\n".join(scaling_analysis)
+
     def generate_performance_analysis(self, data: Dict[str, Any]) -> str:
-        """Generate detailed performance analysis text."""
+        """Generate comprehensive performance analysis text."""
         if 'analysis' not in data or 'agent_comparison' not in data['analysis']:
             return "No analysis data available"
 
@@ -172,6 +366,15 @@ class ResearchReportGenerator:
                 f"CPU {cpu_util:.1%}, Avg Pods: {pod_count:.1f}, "
                 f"Efficiency: {efficiency:.2f}"
             )
+
+        # Add detailed cost analysis
+        analysis_text.append("\n" + self.generate_detailed_cost_analysis(data))
+
+        # Add traffic load analysis
+        analysis_text.append("\n" + self.generate_traffic_load_analysis(data))
+
+        # Add scaling behavior analysis
+        analysis_text.append("\n" + self.generate_scaling_behavior_analysis(data))
 
         return "\n".join(analysis_text)
 
@@ -373,6 +576,27 @@ class ResearchReportGenerator:
         report_content.append("# Autoscaling Performance Research Report")
         report_content.append(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n")
 
+        # Add enhanced summary with key metrics
+        if 'analysis' in data and 'agent_comparison' in data['analysis']:
+            agent_comparison = data['analysis']['agent_comparison']
+            best_agent = min(agent_comparison.items(), key=lambda x: x[1]['avg_response_time'])
+
+            # Safe calculation of scenario count
+            scenario_count = 0
+            total_tests = 0
+            if 'results' in data and data['results']:
+                first_agent_data = list(data['results'].values())[0]
+                scenario_count = len(first_agent_data) if first_agent_data else 0
+                total_tests = sum(len(scenarios) for scenarios in data['results'].values() if scenarios)
+
+            report_content.append("## Key Findings Summary")
+            report_content.append(f"- **Best Performing Agent**: {best_agent[0].replace('_', ' ').title()} "
+                                f"({best_agent[1]['avg_response_time']:.3f}s avg response time)")
+            report_content.append(f"- **Total Test Scenarios**: {scenario_count} scenarios")
+            report_content.append(f"- **Total Metrics Collected**: {total_tests} data points")
+            report_content.append(f"- **Agents Compared**: {len(agent_comparison)} different autoscaling approaches")
+            report_content.append("")
+
         # Executive Summary
         report_content.append("## Executive Summary")
         report_content.append(
@@ -409,7 +633,7 @@ class ResearchReportGenerator:
 
         report_content.append("")
 
-        # Performance Analysis
+        # Performance Analysis (now includes detailed cost, traffic, and scaling analysis)
         performance_analysis = self.generate_performance_analysis(data)
         report_content.append(performance_analysis)
 
@@ -456,8 +680,39 @@ class ResearchReportGenerator:
             "1. **Multi-Service Coordination**: Scaling decisions across interconnected services\n"
             "2. **Transfer Learning**: Knowledge sharing between different deployment environments\n"
             "3. **Explainable AI**: Interpretable scaling decisions for operational transparency\n"
-            "4. **Real-World Validation**: Extended studies on production Kubernetes clusters"
+            "4. **Real-World Validation**: Extended studies on production Kubernetes clusters\n"
+            "5. **Cost Optimization Models**: Advanced cost prediction and optimization algorithms\n"
+            "6. **Multi-Cloud Scenarios**: Cross-cloud autoscaling with heterogeneous resources"
         )
+
+        # Add technical appendix
+        report_content.append("\n## Technical Appendix")
+        report_content.append("### Test Configuration")
+        if 'results' in data:
+            sample_metric = None
+            for scenarios in data['results'].values():
+                for metrics_list in scenarios.values():
+                    if metrics_list:
+                        sample_metric = metrics_list[0]
+                        break
+                if sample_metric:
+                    break
+
+            if sample_metric:
+                report_content.append(f"- Simulation timestep: Real-time equivalent steps")
+                report_content.append(f"- Cost model: ${0.1:.2f} per pod per simulation step")
+                report_content.append(f"- SLA threshold: 200ms response time maximum")
+                report_content.append(f"- CPU target utilization: 70% optimal range")
+                report_content.append(f"- Pod scaling range: 1-10 pods maximum")
+
+        report_content.append("\n### Metrics Definitions")
+        report_content.append("- **Response Time**: Average time to process requests (lower is better)")
+        report_content.append("- **Throughput**: Requests processed per second")
+        report_content.append("- **CPU Utilization**: Percentage of allocated CPU resources used")
+        report_content.append("- **SLA Violations**: Count of times response time exceeded 200ms threshold")
+        report_content.append("- **Resource Cost**: Cumulative cost based on pod usage over time")
+        report_content.append("- **Scaling Frequency**: Number of scaling decisions per hour")
+        report_content.append("- **Over/Under Provisioning Ratio**: Measure of resource efficiency")
 
         # Write report
         with open(output_file, 'w') as f:
@@ -470,7 +725,7 @@ class ResearchReportGenerator:
         return output_file
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate research report from autoscaling test results')
+    parser = argparse.ArgumentParser(description='Generate enhanced research report from autoscaling test results')
     parser.add_argument('--results-dir', default='./test_results',
                        help='Directory containing test results')
     parser.add_argument('--metrics-dir', default='./metrics',
@@ -487,12 +742,16 @@ def main():
     report_file = generator.generate_report(args.output)
 
     if report_file:
-        print(f"\n✅ Research report successfully generated: {report_file}")
+        print(f"\n✅ Enhanced research report successfully generated: {report_file}")
         print("\nReport includes:")
         print("  - Comprehensive performance analysis")
+        print("  - Detailed cost calculation and efficiency analysis")
+        print("  - Traffic load pattern breakdown")
+        print("  - Scaling behavior analysis with action distributions")
         print("  - Statistical significance testing")
         print("  - Performance visualizations")
         print("  - Research conclusions and recommendations")
+        print("  - Technical appendix with configuration details")
     else:
         print("❌ Failed to generate report - no test data found")
 
