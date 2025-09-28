@@ -14,6 +14,36 @@ The enhanced performance testing framework provides:
 6. **Reproducible Research**: Complete environment documentation and metadata
 7. **Grafana Integration**: Auto-generated dashboards with import instructions
 
+## 🚀 **Single Command Complete Workflow**
+
+**For production-grade monitoring with Docker (Simplified Setup):**
+
+```bash
+# One command runs everything: test + Prometheus + Grafana + monitoring
+./scripts/complete-docker-workflow.sh
+```
+
+**What this does automatically:**
+- ✅ Runs publication-quality performance tests
+- ✅ Deploys Prometheus & Grafana using Docker containers
+- ✅ Works with any Docker installation (no Kubernetes required)
+- ✅ Configures monitoring stack with auto-scraped metrics
+- ✅ Imports dashboard and provides access URLs
+- ✅ Creates publication-ready data packages
+
+**Prerequisites:**
+- ✅ `Docker` installed and running
+- ✅ No Kubernetes cluster required
+- ✅ Ports 3000, 8080, 9090 available on localhost
+
+**Access after completion:**
+- 📊 **Grafana Dashboard**: `http://localhost:3000` (admin/admin)
+- 📈 **Prometheus Metrics**: `http://localhost:9090`
+- 🔧 **Metrics Service**: `http://localhost:8080/metrics`
+- 📚 **Publication Data**: `publication_data/study_*/`
+
+---
+
 ## Quick Start
 
 ### Step 1: Choose Your Testing Mode
@@ -1328,55 +1358,134 @@ echo "📖 Grafana Import Guide:"
 cat metrics/grafana_dashboard_*_import_instructions.md
 ```
 
-### 🎯 **Complete Workflow Script**
+### 🎯 **Complete Docker Workflow Script**
 
-For convenience, here's a complete script that runs everything:
+**Single Command for Complete Workflow:**
 
 ```bash
-#!/bin/bash
-# complete_workflow.sh - Complete publication-quality testing workflow
-
-echo "🚀 Starting Complete Publication-Quality Workflow"
-echo "================================================="
-
-# Step 1: Run publication test
-echo "📊 Step 1: Running publication-quality test..."
-./scripts/run-performance-test.sh publication
-
-# Step 2: Start Grafana (if not running)
-if ! curl -s http://localhost:3000/api/health >/dev/null 2>&1; then
-    echo "🖥️ Step 2: Starting Grafana..."
-    docker run -d -p 3000:3000 --name grafana grafana/grafana:latest
-    echo "⏳ Waiting for Grafana to start..."
-    sleep 30
-else
-    echo "✅ Grafana already running"
-fi
-
-# Step 3: Start Prometheus (optional)
-if ! curl -s http://localhost:9090/-/healthy >/dev/null 2>&1; then
-    echo "📈 Step 3: Starting Prometheus..."
-    docker run -d -p 9090:9090 --name prometheus \
-      -v $(pwd)/metrics:/prometheus/data \
-      prom/prometheus:latest
-else
-    echo "✅ Prometheus already running"
-fi
-
-# Step 4: Show results
-echo "📋 Step 4: Results Summary"
-echo "=========================="
-echo "🌐 Grafana Dashboard: http://localhost:3000"
-echo "📊 Prometheus Metrics: http://localhost:9090"
-echo ""
-echo "📄 Generated Files:"
-echo "  Dashboard: $(ls metrics/grafana_dashboard_*.json 2>/dev/null | head -1)"
-echo "  Instructions: $(ls metrics/grafana_dashboard_*_instructions.md 2>/dev/null | head -1)"
-echo "  Results: $(ls test_results/performance_study_*.json 2>/dev/null | head -1)"
-echo "  Publication: $(ls -d publication_data/study_* 2>/dev/null | head -1)"
-echo ""
-echo "✅ Workflow Complete! Open http://localhost:3000 to view dashboard"
+# One command to run everything with Docker monitoring
+./scripts/complete-docker-workflow.sh
 ```
+
+**This automated script performs:**
+1. ✅ **Docker environment validation** (checks if Docker is running)
+2. ✅ **Publication-quality test execution**
+3. ✅ **Prometheus deployment with auto-configuration**
+4. ✅ **Grafana deployment with data source setup**
+5. ✅ **Automatic dashboard import**
+6. ✅ **Service exposure and access URLs**
+
+### 📊 **Complete Workflow Script Options**
+
+```bash
+# Basic usage - runs everything
+./scripts/complete-docker-workflow.sh
+
+# Show help and options
+./scripts/complete-docker-workflow.sh --help
+
+# Check current monitoring status
+./scripts/complete-docker-workflow.sh --status
+
+# Start monitoring only (skip publication test)
+./scripts/complete-docker-workflow.sh --start-only
+
+# Update metrics with latest data
+./scripts/complete-docker-workflow.sh --update-metrics
+
+# Cleanup existing monitoring stack
+./scripts/complete-docker-workflow.sh --cleanup
+```
+
+### 🚀 **What the Complete Workflow Does**
+
+#### **Step 1-2: Environment Setup**
+- Validates Docker installation and availability
+- Checks for existing containers and cleans them up
+- Creates Docker network for container communication
+
+#### **Step 3: Publication Test**
+- Runs `./scripts/run-performance-test.sh publication`
+- Generates all metrics, dashboards, and analysis
+- Creates publication-ready data packages
+
+#### **Step 4-6: Monitoring Stack**
+- Deploys metrics service with real-time data serving
+- Deploys Prometheus with autoscaling metrics scraping
+- Deploys Grafana with auto-configuration
+
+#### **Step 7-9: Configuration & Access**
+- Auto-configures Prometheus data source in Grafana
+- Imports generated dashboard automatically
+- Provides access URLs and credentials
+
+### 📱 **Access Your Monitoring Stack**
+
+After running the complete workflow:
+
+```bash
+# Get access information
+./scripts/complete-docker-workflow.sh --status
+
+# Direct access URLs:
+# 📊 Grafana: http://localhost:3000 (admin/admin)
+# 📈 Prometheus: http://localhost:9090
+# 🔧 Metrics Service: http://localhost:8080/metrics
+```
+
+### 🔧 **Management Commands**
+
+```bash
+# View monitoring stack logs
+docker logs autoscaling-grafana
+docker logs autoscaling-prometheus
+docker logs autoscaling-metrics
+
+# Check container status
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+
+# Update metrics with latest test data
+./scripts/complete-docker-workflow.sh --update-metrics
+
+# Restart specific services
+docker restart autoscaling-grafana
+docker restart autoscaling-prometheus
+docker restart autoscaling-metrics
+
+# View container resource usage
+docker stats autoscaling-grafana autoscaling-prometheus autoscaling-metrics
+
+# Access container shells for debugging
+docker exec -it autoscaling-grafana /bin/bash
+docker exec -it autoscaling-prometheus /bin/sh
+
+# Delete entire monitoring stack
+./scripts/complete-docker-workflow.sh --cleanup
+```
+
+### 🎯 **Docker Workflow Features**
+
+The Docker workflow provides several advantages over Kubernetes:
+
+**✅ Simplified Setup:**
+- No Kubernetes cluster required
+- No kubectl configuration needed
+- Works on any machine with Docker
+
+**✅ Faster Deployment:**
+- Containers start in seconds
+- No complex networking setup
+- Direct localhost access
+
+**✅ Easy Management:**
+- Simple Docker commands for troubleshooting
+- Individual container control
+- Quick cleanup and restart
+
+**✅ Development Friendly:**
+- Perfect for local testing
+- Easy to modify and experiment
+- No cluster resource constraints
 
 ### 📊 **Alternative Quick Visualization**
 
@@ -1400,14 +1509,21 @@ echo "  - Excel/Numbers: $(ls metrics/autoscaler_metrics_*.csv)"
 echo "  - Publication tables: $(ls publication_data/study_*/tables/*.csv)"
 ```
 
-### 🔍 **Verification Checklist**
+### 🔍 **Docker Workflow Verification Checklist**
 
 Before proceeding with publication or presentation:
 
 ```bash
 # Verify all components are working
-echo "🔍 Verification Checklist:"
-echo "========================="
+echo "🔍 Docker Workflow Verification Checklist:"
+echo "========================================="
+
+# Check Docker is running
+if docker info >/dev/null 2>&1; then
+    echo "✅ Docker is running"
+else
+    echo "❌ Docker is not running - start Docker first"
+fi
 
 # Check test results
 if [ -f "$(ls test_results/performance_study_*.json 2>/dev/null | head -1)" ]; then
@@ -1430,20 +1546,53 @@ else
     echo "❌ Publication data package missing"
 fi
 
-# Check Grafana accessibility
+# Check Docker containers
+if docker ps --format '{{.Names}}' | grep -q "autoscaling-grafana"; then
+    echo "✅ Grafana container running"
+else
+    echo "⚠️ Grafana container not running"
+fi
+
+if docker ps --format '{{.Names}}' | grep -q "autoscaling-prometheus"; then
+    echo "✅ Prometheus container running"
+else
+    echo "⚠️ Prometheus container not running"
+fi
+
+if docker ps --format '{{.Names}}' | grep -q "autoscaling-metrics"; then
+    echo "✅ Metrics service container running"
+else
+    echo "⚠️ Metrics service container not running"
+fi
+
+# Check service accessibility
 if curl -s http://localhost:3000/api/health >/dev/null 2>&1; then
     echo "✅ Grafana accessible at http://localhost:3000"
 else
-    echo "⚠️ Grafana not running - start with docker or brew"
+    echo "⚠️ Grafana not accessible"
+fi
+
+if curl -s http://localhost:9090/-/ready >/dev/null 2>&1; then
+    echo "✅ Prometheus accessible at http://localhost:9090"
+else
+    echo "⚠️ Prometheus not accessible"
+fi
+
+if curl -s http://localhost:8080/health >/dev/null 2>&1; then
+    echo "✅ Metrics service accessible at http://localhost:8080"
+else
+    echo "⚠️ Metrics service not accessible"
 fi
 
 echo ""
 echo "🎯 Next Steps:"
 echo "1. Open http://localhost:3000 (admin/admin)"
-echo "2. Import dashboard from metrics/grafana_dashboard_*.json"
+echo "2. Dashboard should be auto-imported, or import from metrics/grafana_dashboard_*.json"
 echo "3. Review publication data in publication_data/study_*/"
 echo "4. Use LaTeX tables for academic papers"
 echo "5. Use CSV data for additional analysis"
+echo "6. Use ./scripts/complete-docker-workflow.sh --status for container status"
+echo "7. Use ./scripts/complete-docker-workflow.sh --cleanup to stop all containers"
 ```
 
 This complete workflow provides everything needed to run publication-quality autoscaling performance tests and visualize the results professionally in Grafana.

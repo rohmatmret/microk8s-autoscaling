@@ -183,3 +183,6 @@ ppo_tensorboard/
 
 metrics/*
 test_results/*
+
+publication/*
+publication_data/*
