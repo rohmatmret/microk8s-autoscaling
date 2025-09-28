@@ -37,19 +37,19 @@ def test_get_cluster_state_success(mock_api):
     }
 
 def test_safe_scale_within_bounds(mock_api):
-    mock_api._get_current_replicas = MagicMock(return_value=2)
-    mock_api.apps_api.read_namespaced_deployment.return_value.status.ready_replicas = 3
+    mock_api._get_current_replicas = MagicMock(return_value=1)
+    mock_api.apps_api.read_namespaced_deployment.return_value.status.ready_replicas = 1
     
     assert mock_api.safe_scale("app", "default", 3) is True
     mock_api._scale_deployment.assert_called_once_with("app", "default", 3)
 
 def test_safe_scale_upper_bound(mock_api):
-    mock_api._get_current_replicas = MagicMock(return_value=5)
+    mock_api._get_current_replicas = MagicMock(return_value=1)
     assert mock_api.safe_scale("app", "default", 10) is True  # Clamped to 5
     mock_api._scale_deployment.assert_not_called()
 
 def test_scale_verification_timeout(mock_api):
-    mock_api.apps_api.read_namespaced_deployment.return_value.status.ready_replicas = 2
+    mock_api.apps_api.read_namespaced_deployment.return_value.status.ready_replicas = 1
     with patch('time.time', side_effect=[0, 301]), \
          patch('time.sleep'):
         with pytest.raises(KubernetesAPIError):

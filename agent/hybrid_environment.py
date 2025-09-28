@@ -95,8 +95,8 @@ class HybridMicroK8sEnv(gym.Env):
     def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
         """Reset environment to initial state."""
         try:
-            # Set initial pod count to 2
-            self.k8s_api.safe_scale(self.deployment_name, 2)
+            # Set initial pod count to 1
+            self.k8s_api.safe_scale(self.deployment_name, 1)
             time.sleep(self.scaling_delay)
             
             # Reset episode tracking

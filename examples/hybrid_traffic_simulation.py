@@ -248,6 +248,12 @@ class AgentPerformanceTester:
         self.test_results: Dict[str, List[AutoscalingMetrics]] = {}
         self.scenarios = self._define_test_scenarios()
 
+        # Set up results and metrics directories
+        self.results_dir = os.getenv('RESULTS_DIR', 'test_results')
+        self.metrics_dir = os.getenv('METRICS_DIR', 'metrics')
+        os.makedirs(self.results_dir, exist_ok=True)
+        os.makedirs(self.metrics_dir, exist_ok=True)
+
         # Load configuration
         try:
             import yaml
@@ -277,51 +283,51 @@ class AgentPerformanceTester:
         return [
             TestScenario(
                 name="baseline_steady",
-                description="Steady baseline load",
+                description="Steady baseline load - Production-level traffic",
                 duration_steps=1000,
                 traffic_pattern="steady",
-                base_load=100,
-                max_load=120,
+                base_load=2500,  # 5x increase: 500 -> 2500 RPS
+                max_load=4000,   # 5x increase: 800 -> 4000 RPS
                 event_frequency=0.0,
                 target_metrics={"cpu_utilization": 0.7, "response_time": 0.1}
             ),
             TestScenario(
                 name="gradual_ramp",
-                description="Gradual load increase",
+                description="Gradual load increase - E-commerce peak hours",
                 duration_steps=2000,
                 traffic_pattern="gradual",
-                base_load=50,
-                max_load=300,
-                event_frequency=0.001,
+                base_load=1000,   # 5x increase: 200 -> 1000 RPS
+                max_load=5000,    # 5x increase: 1000 -> 5000 RPS
+                event_frequency=0.002,
                 target_metrics={"cpu_utilization": 0.75, "response_time": 0.15}
             ),
             TestScenario(
                 name="sudden_spike",
-                description="Sudden traffic spikes",
+                description="Sudden traffic spikes - Social media viral content",
                 duration_steps=1500,
                 traffic_pattern="spike",
-                base_load=100,
-                max_load=500,
-                event_frequency=0.01,
+                base_load=2000,   # 5x increase: 400 -> 2000 RPS
+                max_load=10000,   # 5x increase: 2000 -> 10000 RPS
+                event_frequency=0.02,
                 target_metrics={"cpu_utilization": 0.8, "response_time": 0.2}
             ),
             TestScenario(
                 name="flash_crowd",
-                description="Flash crowd events",
+                description="Flash crowd events - Black Friday/Cyber Monday",
                 duration_steps=3000,
                 traffic_pattern="flash",
-                base_load=80,
-                max_load=800,
-                event_frequency=0.005,
+                base_load=1500,   # 5x increase: 300 -> 1500 RPS
+                max_load=15000,   # 5x increase: 3000 -> 15000 RPS
+                event_frequency=0.01,
                 target_metrics={"cpu_utilization": 0.85, "response_time": 0.25}
             ),
             TestScenario(
                 name="daily_pattern",
-                description="Daily usage pattern",
+                description="Daily usage pattern - Real-world application",
                 duration_steps=4320,  # 3 days
                 traffic_pattern="daily",
-                base_load=100,
-                max_load=400,
+                base_load=500,    # 5x increase: 100 -> 500 RPS
+                max_load=2000,    # 5x increase: 400 -> 2000 RPS
                 event_frequency=0.002,
                 target_metrics={"cpu_utilization": 0.7, "response_time": 0.12}
             )
@@ -396,7 +402,7 @@ class AgentPerformanceTester:
         action_counts = {"scale_up": 0, "scale_down": 0, "no_change": 0}
 
         # Simulation variables
-        current_pods = 3
+        current_pods = 1
         cpu_utilization = 0.5
         response_time = 0.1
         scaling_actions = []
@@ -409,9 +415,11 @@ class AgentPerformanceTester:
                 current_load = simulator.get_load(step)
 
                 # Simulate system state based on load and current pods
-                cpu_utilization = min(1.0, current_load / (current_pods * 100))
+                # Fixed: Use realistic pod capacity (500 RPS per pod instead of 100)
+                pod_capacity = 500  # RPS per pod - adjusted for 5x traffic increase
+                cpu_utilization = min(1.0, current_load / (current_pods * pod_capacity))
                 response_time = max(0.05, 0.1 + (cpu_utilization - 0.7) * 0.5 if cpu_utilization > 0.7 else 0.1)
-                throughput = min(current_load, current_pods * 100)
+                throughput = min(current_load, current_pods * pod_capacity)
                 queue_length = max(0, current_load - throughput) / 100.0
 
                 # Create state vector for RL agents (7-dimensional to match environment)
@@ -427,9 +435,9 @@ class AgentPerformanceTester:
                 ])
 
                 # Get agent action
-                if hasattr(agent, 'step'):
-                    # For hybrid agent
-                    result = agent.step()
+                if hasattr(agent, 'step_with_external_state'):
+                    # For hybrid agent - FIX: Pass external state instead of using internal random state
+                    result = agent.step_with_external_state(state)
                     action = result['action']
                     reward = result['reward']
                 elif hasattr(agent, 'get_scaling_decision'):
@@ -438,7 +446,7 @@ class AgentPerformanceTester:
                     reward = self._calculate_reward(cpu_utilization, response_time, current_pods)
                 else:
                     # For rule-based agent
-                    action = agent.decide_action(cpu_utilization, current_pods)
+                    action = agent.decide_action(cpu_utilization, current_pods, step)
                     reward = 0.0
 
                 # Apply action
@@ -454,8 +462,8 @@ class AgentPerformanceTester:
                     action_counts["no_change"] += 1
 
                 # Calculate metrics
-                over_provisioning = max(0, (current_pods * 100 - current_load) / current_load) if current_load > 0 else 0
-                under_provisioning = max(0, (current_load - current_pods * 100) / current_load) if current_load > 0 else 0
+                over_provisioning = max(0, (current_pods * pod_capacity - current_load) / current_load) if current_load > 0 else 0
+                under_provisioning = max(0, (current_load - current_pods * pod_capacity) / current_load) if current_load > 0 else 0
 
                 # SLA violations (response time > 200ms)
                 if response_time > 0.2:
@@ -470,7 +478,7 @@ class AgentPerformanceTester:
                         cpu_utilization=cpu_utilization,
                         memory_utilization=np.random.uniform(0.3, 0.7),
                         pod_count=current_pods,
-                        target_pod_count=max(1, int(current_load / 100)),
+                        target_pod_count=max(1, int(current_load / pod_capacity)),
                         response_time=response_time,
                         throughput=throughput,
                         queue_length=queue_length,
@@ -608,7 +616,7 @@ class AgentPerformanceTester:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         # Export detailed results as JSON
-        results_file = f"performance_study_{timestamp}.json"
+        results_file = f"{self.results_dir}/performance_study_{timestamp}.json"
         with open(results_file, 'w') as f:
             # Convert results to serializable format
             serializable_results = {}
@@ -703,11 +711,11 @@ class AgentPerformanceTester:
 class RuleBasedAutoscaler:
     """Traditional rule-based autoscaler for comparison."""
 
-    def __init__(self, cpu_threshold_up: float = 0.8, cpu_threshold_down: float = 0.3):
+    def __init__(self, cpu_threshold_up: float = 0.5, cpu_threshold_down: float = 0.3):  # Match HPA threshold
         self.cpu_threshold_up = cpu_threshold_up
         self.cpu_threshold_down = cpu_threshold_down
         self.last_action_time = 0
-        self.cooldown_period = 30  # steps
+        self.cooldown_period = 10  # steps - reduced for better responsiveness with realistic loads
 
     def decide_action(self, cpu_utilization: float, current_pods: int, step: int = 0) -> int:
         """Decide scaling action based on CPU utilization."""
@@ -747,10 +755,17 @@ def simulate_hybrid_traffic_with_agents():
     logger.info("Starting comprehensive autoscaling performance study")
 
     # Run the comparative study
+    # Force conservative testing with actual reward function
+    mock_mode = os.getenv('MOCK_MODE', 'true').lower() == 'true'
+    if not mock_mode:
+        print("⚠️  WARNING: Running in REAL mode - will actually test conservative agent")
+    else:
+        print("🧪 Running in MOCK mode - using simulated behavior")
+
     results = tester.run_comparative_study(
         agent_types=agent_types,
         scenarios=test_scenarios,
-        mock_mode=True  # Set to False for real K8s testing
+        mock_mode=mock_mode
     )
 
     # Print summary

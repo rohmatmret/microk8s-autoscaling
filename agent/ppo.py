@@ -15,6 +15,7 @@ from agent.environment_simulated import MicroK8sEnvSimulated
 from agent.system_callback_metrics import SystemMetricsCallback
 from agent.traffic_simulation import TrafficSimulator
 import torch as th
+import torch
 import sys
 import gym
 from gym import spaces
@@ -236,7 +237,7 @@ class PPOAgent:
                 "algorithm": "PPO",
                 "environment": ENV_NAME,
                 "reward_shaping": True,
-                "learning_rate": get_linear_fn(learning_rate, 0.0001, 1.0),  # Jadwal untuk stabilitas
+                "learning_rate": learning_rate,  # Fixed: use actual learning rate value
                 "gamma": gamma,
                 "gae_lambda": 0.95,
                 "n_steps": n_steps,
@@ -290,8 +291,8 @@ class PPOAgent:
         # Update traffic simulator parameters for evaluation
         for env in self.eval_env.envs:
             if hasattr(env, 'env') and hasattr(env.env, 'traffic_simulator'):
-                env.env.traffic_simulator.base_load = 150
-                env.env.traffic_simulator.max_spike = 50
+                env.env.traffic_simulator.base_load = 750  # 5x increase: 150 -> 750 RPS
+                env.env.traffic_simulator.max_spike = 250  # 5x increase: 50 -> 250 RPS
                 env.env.traffic_simulator.daily_amplitude = 0.5
                 env.env.traffic_simulator.spike_probability = 0.01
             else:
@@ -300,10 +301,13 @@ class PPOAgent:
 
     def _initialize_model(self, learning_rate: float, n_steps: int, batch_size: int, gamma: float):
         """Initializes the PPO model."""
+        # Fix learning rate by using linear schedule for better stability
+        learning_rate_schedule = get_linear_fn(learning_rate, learning_rate * 0.1, 1.0)
+
         self.model = PPO(
             policy="MlpPolicy",
             env=self.env,
-            learning_rate=learning_rate,
+            learning_rate=learning_rate_schedule,  # Use schedule for better convergence
             n_steps=n_steps,
             batch_size=batch_size,
             gamma=gamma,
@@ -311,11 +315,15 @@ class PPOAgent:
             clip_range=0.2,
             n_epochs=10,
             verbose=1,
-            ent_coef=0.05,  # Added entropy coefficient
-            max_grad_norm=0.5,  # Add gradient clipping
-            policy_kwargs=dict(net_arch=[64,64]),
+            ent_coef=0.01,  # Reduced entropy coefficient for more stable learning
+            vf_coef=0.5,    # Added value function coefficient
+            max_grad_norm=0.5,
+            policy_kwargs=dict(
+                net_arch=[dict(pi=[64, 64], vf=[64, 64])],  # Separate networks for actor-critic
+                activation_fn=th.nn.Tanh  # Better activation for stability
+            ),
             seed=42,
-            device="auto" 
+            device="auto"
         )
         logger.info("PPO model initialized.")
 
@@ -595,8 +603,8 @@ if __name__ == "__main__":
     # Create the appropriate environment
     if args.simulate:
         traffic_simulator = TrafficSimulator(
-            base_load=100,
-            max_spike=30,
+            base_load=500,  # 5x increase: 100 -> 500 RPS for realistic load
+            max_spike=150,  # 5x increase: 30 -> 150 RPS for realistic spikes
         )
         env = MicroK8sEnvSimulated()
         print("Using SIMULATED environment")

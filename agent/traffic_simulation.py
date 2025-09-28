@@ -21,15 +21,15 @@ class TrafficEvent:
 class TrafficSimulator:
     """Simulates realistic traffic patterns with multiple event types and patterns."""
     
-    def __init__(self, 
-                 base_load: float = 50,
-                 max_spike: float = 30,
+    def __init__(self,
+                 base_load: float = 250,  # 5x increase: 50 -> 250 RPS for realistic baseline
+                 max_spike: float = 150,  # 5x increase: 30 -> 150 RPS for realistic spikes
                  seed: Optional[int] = None,
                  daily_amplitude: float = 0.5,
                  spike_probability: float = 0.005,
                  min_spike_duration: int = 10,
                  max_spike_duration: int = 30,
-                 min_load: float = 5,
+                 min_load: float = 25,  # 5x increase: 5 -> 25 RPS for realistic minimum
                  history_size: int = 1000) -> None:
         """
         Initialize the traffic simulator with configurable parameters.
@@ -192,9 +192,9 @@ class TrafficSimulator:
 class HybridTrafficSimulator:
     """Simulates realistic traffic patterns with sudden spikes, gradual increases, drastic drops, and hybrid patterns."""
     
-    def __init__(self, base_load: float = 100, seed: Optional[int] = None, 
-                 event_frequency: float = 0.005, min_intensity: float = 5, 
-                 max_intensity: float = 50, min_duration: int = 10, 
+    def __init__(self, base_load: float = 500, seed: Optional[int] = None,  # 5x: 100 -> 500 RPS
+                 event_frequency: float = 0.005, min_intensity: float = 25,  # 5x: 5 -> 25 RPS
+                 max_intensity: float = 250, min_duration: int = 10,  # 5x: 50 -> 250 RPS
                  max_duration: int = 200) -> None:
         """
         Initialize the traffic simulator with configurable parameters.

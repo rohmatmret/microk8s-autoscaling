@@ -48,8 +48,8 @@ class MicroK8sEnv(gym.Env):
     def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
         """Reset environment to initial state."""
         try:
-            # Set initial pod count to 2
-            self.k8s.safe_scale(self.deployment_name, 2)
+            # Set initial pod count to 1
+            self.k8s.safe_scale(self.deployment_name, 1)
             time.sleep(self.scaling_delay)
             self.state = self._get_normalized_state()
             logger.info("Environment reset: state=%s", self.state)

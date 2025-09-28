@@ -3,12 +3,12 @@ from agent.traffic_simulation import TrafficSimulator
 
 @pytest.fixture
 def simulator():
-    return TrafficSimulator(base_load=100, max_spike=30, seed=42)
+    return TrafficSimulator(base_load=500, max_spike=150, seed=42)  # Updated for realistic loads
 
 def test_initialization(simulator):
-    assert simulator.base_load == 100
-    assert simulator.max_spike == 30 
-    assert simulator.current_load == 100
+    assert simulator.base_load == 500
+    assert simulator.max_spike == 150
+    assert simulator.current_load == 500
     assert simulator.spike_duration == 0
     assert len(simulator.events) == 5
 

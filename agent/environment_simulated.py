@@ -31,20 +31,20 @@ class MicroK8sEnvSimulated(gym.Env):
         super().__init__()
        
         self.traffic_simulator = TrafficSimulator(
-            base_load=100,
-            max_spike=30,
+            base_load=500,  # 5x increase: 100 -> 500 RPS for production-level load
+            max_spike=150,  # 5x increase: 30 -> 150 RPS for realistic spikes
             daily_amplitude=0.3,
             spike_probability=0.005,
             min_spike_duration=10,
             max_spike_duration=30,
-            min_load=10,
+            min_load=50,    # 5x increase: 10 -> 50 RPS for realistic minimum
             history_size=self.MAX_HISTORY_LENGTH
         )
         self.api = MockKubernetesAPI(traffic_simulator=self.traffic_simulator.get_load)
         self.enable_visualization = enable_visualization
         
         self.action_space = spaces.Discrete(3)  # (0: no-op, 1: scale-up, 2: scale-down)
-        self.pods = 5  # Initial pod count
+        self.pods = 1  # Initial pod count
         self.cpu_util = self.DEFAULT_CPU
         self.memory_util = self.DEFAULT_MEMORY
         

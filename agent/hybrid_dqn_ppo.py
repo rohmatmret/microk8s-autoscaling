@@ -32,8 +32,8 @@ class HybridConfig:
     dqn_gamma: float = 0.99
     dqn_tau: float = 0.1
     dqn_epsilon_start: float = 1.0
-    dqn_epsilon_end: float = 0.07
-    dqn_epsilon_decay: float = 0.995
+    dqn_epsilon_end: float = 0.15  # Higher minimum exploration
+    dqn_epsilon_decay: float = 0.999  # Slower decay for sustained exploration
     dqn_target_update_freq: int = 2000
     
     # PPO Configuration
@@ -48,7 +48,7 @@ class HybridConfig:
     # Hybrid Configuration
     reward_optimization_freq: int = 100
     batch_evaluation_steps: int = 50
-    state_dim: int = 6  # Fixed to match 6-dimensional state space
+    state_dim: int = 7  # Fixed to match 7-dimensional state space from test simulation
     action_dim: int = 3
     hidden_dim: int = 64
 
@@ -137,10 +137,19 @@ class DQNAgent:
         logger.info("DQN Agent initialized")
         
     def select_action(self, state: np.ndarray, training: bool = True) -> int:
-        """Select action using epsilon-greedy policy."""
+        """Select action using enhanced epsilon-greedy policy with adaptive exploration."""
+        # Enhanced exploration for dynamic behavior
         if training and random.random() < self.epsilon:
+            # Adaptive exploration based on CPU utilization
+            if len(state) >= 4:
+                cpu_util = state[0]
+                # Bias exploration towards scaling actions when CPU is extreme
+                if cpu_util > 0.8:  # High CPU -> bias towards scale-up
+                    return random.choices([0, 1, 2], weights=[0.6, 0.2, 0.2])[0]
+                elif cpu_util < 0.4:  # Low CPU -> bias towards scale-down
+                    return random.choices([0, 1, 2], weights=[0.2, 0.6, 0.2])[0]
             return random.randint(0, self.config.action_dim - 1)
-        
+
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.q_network(state_tensor)
@@ -219,16 +228,18 @@ class PPORewardOptimizer:
         self.optimizer = optim.Adam(self.network.parameters(), lr=config.ppo_learning_rate)
         
         # Bayesian optimizer for reward function tuning
-        # Define parameter bounds for reward function optimization
+        # Define parameter bounds for dynamic scaling optimization
         param_bounds = {
-            'latency_weight': (0.1, 0.8),
-            'cpu_weight': (0.1, 0.5),
+            'latency_weight': (0.2, 1.0),  # Higher priority on latency
+            'cpu_weight': (0.2, 0.8),     # Higher CPU sensitivity
             'memory_weight': (0.05, 0.3),
-            'cost_weight': (0.05, 0.3),
-            'throughput_weight': (0.01, 0.2),
-            'latency_threshold': (0.1, 0.5),
-            'cpu_threshold': (0.5, 0.9),
-            'cost_threshold': (0.6, 0.95)
+            'cost_weight': (0.05, 0.4),   # Higher cost awareness
+            'throughput_weight': (0.1, 0.5),  # More throughput focus
+            'latency_threshold': (0.15, 0.4),  # Tighter latency bounds
+            'cpu_threshold': (0.4, 0.7),       # Aligned with HPA thresholds (30%-70%)
+            'cost_threshold': (0.5, 0.9),      # More cost-sensitive
+            'scaling_reward': (0.1, 1.0),      # Reward for appropriate scaling
+            'stability_penalty': (0.1, 0.5)    # Penalty for excessive changes
         }
         self.bayesian_optimizer = BayesianOptimizer(param_bounds)
         
@@ -264,31 +275,46 @@ class PPORewardOptimizer:
     
     def _calculate_optimized_reward(self, base_reward: float, modulation: float,
                                   metrics: Dict[str, float], params: Dict[str, float]) -> float:
-        """Calculate optimized reward using multiple factors."""
+        """Calculate optimized reward using multiple factors with dynamic scaling focus."""
         latency = metrics.get('latency', 0.0)
         throughput = metrics.get('throughput', 0.0)
         cost = metrics.get('cost', 0.0)
         queue_length = metrics.get('queue_length', 0.0)
-        
+
         # Base reward with modulation
-        reward = base_reward * (1 + modulation)
-        
-        # Latency penalty
-        if latency > params.get('latency_threshold', 0.3):
-            reward -= params.get('latency_penalty', 1.0) * (latency - params.get('latency_threshold', 0.3))
-        
-        # Throughput bonus
-        if throughput > params.get('throughput_threshold', 0.7):
-            reward += params.get('throughput_bonus', 0.5)
-        
-        # Cost penalty
-        if cost > params.get('cost_threshold', 0.8):
-            reward -= params.get('cost_penalty', 0.3) * cost
-        
-        # Queue length penalty
-        if queue_length > params.get('queue_threshold', 0.5):
-            reward -= params.get('queue_penalty', 0.2) * queue_length
-        
+        reward = base_reward * (1 + modulation * 0.5)  # Reduce modulation impact
+
+        # Enhanced latency penalty (more sensitive)
+        latency_threshold = params.get('latency_threshold', 0.25)
+        latency_weight = params.get('latency_weight', 0.5)
+        if latency > latency_threshold:
+            reward -= latency_weight * (latency - latency_threshold) * 2.0
+
+        # Throughput bonus (encourage high throughput)
+        throughput_weight = params.get('throughput_weight', 0.3)
+        if throughput > 0.6:
+            reward += throughput_weight * throughput
+
+        # Cost penalty (scaled by usage)
+        cost_threshold = params.get('cost_threshold', 0.7)
+        cost_weight = params.get('cost_weight', 0.2)
+        if cost > cost_threshold:
+            reward -= cost_weight * (cost - cost_threshold) * 1.5
+
+        # Queue length penalty (avoid backlogs)
+        if queue_length > 0.3:
+            reward -= 0.5 * queue_length
+
+        # Dynamic scaling rewards (new parameters)
+        scaling_reward = params.get('scaling_reward', 0.5)
+        if 'action_appropriateness' in metrics:
+            reward += scaling_reward * metrics['action_appropriateness']
+
+        # Stability penalty for excessive oscillation
+        stability_penalty = params.get('stability_penalty', 0.2)
+        if 'scaling_frequency' in metrics and metrics['scaling_frequency'] > 0.8:
+            reward -= stability_penalty * metrics['scaling_frequency']
+
         return reward
     
     def update(self, states: List[np.ndarray], actions: List[int], 
@@ -365,17 +391,20 @@ class HybridDQNPPOAgent:
         self.config = config
         self.k8s_api = k8s_api
         self.mock_mode = mock_mode
-        
+
         # Initialize agents
         self.dqn_agent = DQNAgent(config)
         self.ppo_optimizer = PPORewardOptimizer(config)
-        
+
         # Training state
         self.total_steps = 0
         self.episode_count = 0
         self.current_episode_reward = 0.0
         self.current_episode_length = 0
-        
+
+        # Mock mode pod tracking - FIX: Properly track current pods
+        self.mock_current_pods = 1  # Track actual pod count in mock mode
+
         # Metrics tracking
         self.metrics_callback = AutoscalingMetricsCallback()
         
@@ -436,14 +465,17 @@ class HybridDQNPPOAgent:
     def execute_action(self, action: int) -> Dict[str, Any]:
         """Execute scaling action and return metrics."""
         if self.mock_mode:
-            # Mock action execution for testing
-            current_replicas = 3  # Mock current replicas
+            # Mock action execution for testing - FIX: Use tracked pod count
+            current_replicas = self.mock_current_pods
             if action == 0:  # Scale up
                 new_replicas = min(current_replicas + 1, self.k8s_api.max_pods)
             elif action == 1:  # Scale down
                 new_replicas = max(current_replicas - 1, 1)
             else:  # No change
                 new_replicas = current_replicas
+
+            # FIX: Update our tracked pod count
+            self.mock_current_pods = new_replicas
             
             # Mock metrics
             metrics = {
@@ -505,39 +537,74 @@ class HybridDQNPPOAgent:
             }
     
     def calculate_base_reward(self, prev_state: np.ndarray, current_state: np.ndarray) -> float:
-        """Calculate base reward from state transition."""
+        """Calculate base reward from state transition with dynamic scaling incentives."""
         # Ensure we have the right number of state dimensions
         if len(current_state) >= 4:
             cpu, memory, latency, pods = current_state[:4]
         else:
             # Fallback for smaller state spaces
             cpu, memory, latency, pods = current_state[0], current_state[1], current_state[2], 0.0
-        
-        reward = 0.0
-        
-        # Performance rewards
-        if latency < 0.3:
-            reward += 1.0
-        elif latency < 0.6:
-            reward += 0.5
+
+        if len(prev_state) >= 4:
+            prev_cpu, prev_memory, prev_latency, prev_pods = prev_state[:4]
         else:
-            reward -= 1.0
-        
-        # Resource penalties
-        if cpu > 0.85:
-            reward -= 0.7
-        elif cpu > 0.7:
-            reward -= 0.4
-        
-        # Cost penalties
-        if pods > 0.8:
+            prev_cpu, prev_memory, prev_latency, prev_pods = prev_state[0], prev_state[1], prev_state[2], 0.0
+
+        reward = 0.0
+
+        # 1. SLA Compliance Rewards (primary objective)
+        if latency < 0.2:  # Excellent SLA
+            reward += 2.0
+        elif latency < 0.3:  # Good SLA
+            reward += 1.0
+        elif latency < 0.5:  # Acceptable SLA
+            reward += 0.3
+        else:  # SLA violation
+            reward -= 2.0
+
+        # 2. Resource Efficiency Rewards (target 40-70% CPU - aligned with HPA thresholds)
+        if 0.4 <= cpu <= 0.7:  # Optimal range - matches rule-based agent targets
+            reward += 1.5
+        elif 0.3 <= cpu < 0.4:  # Under-utilized but acceptable
+            reward += 0.5
+        elif cpu < 0.3:  # Significantly under-utilized
             reward -= 0.5
-        
-        # Scaling efficiency
-        if len(prev_state) >= 4 and prev_state[3] > pods:  # Pods decreased
-            if cpu < prev_state[0] and latency < prev_state[2]:
-                reward += 0.5
-        
+        elif cpu > 0.7:  # Over-utilized - encourage scaling up
+            reward -= 1.0
+
+        # 3. Dynamic Scaling Rewards (encourage appropriate scaling actions)
+        cpu_change = cpu - prev_cpu
+        latency_change = latency - prev_latency
+        pod_change = pods - prev_pods
+
+        # Reward scaling up when needed (high CPU/latency) - aligned with 50% HPA threshold
+        if pod_change > 0 and (cpu > 0.5 or latency > 0.25):
+            reward += 1.0
+
+        # Reward scaling down when appropriate (low CPU/latency) - aligned with 30% threshold
+        elif pod_change < 0 and (cpu < 0.3 and latency < 0.2):
+            reward += 1.0
+
+        # Penalize unnecessary scaling
+        elif pod_change > 0 and cpu < 0.3:  # Scaling up when not needed
+            reward -= 1.5
+        elif pod_change < 0 and cpu > 0.7:  # Scaling down when overloaded
+            reward -= 1.5
+
+        # 4. Cost Efficiency (penalize excessive pods)
+        pod_cost_penalty = pods * 0.1  # Small penalty per pod
+        reward -= pod_cost_penalty
+
+        # 5. Stability bonus (small reward for good steady state) - aligned with HPA targets
+        if abs(pod_change) == 0 and 0.4 <= cpu <= 0.7 and latency < 0.3:
+            reward += 0.2
+
+        # 6. Penalty for extreme states
+        if pods < 0.1:  # Too few pods
+            reward -= 1.0
+        elif pods > 0.9:  # Too many pods
+            reward -= 1.0
+
         return reward
     
     def step(self) -> Dict[str, Any]:
@@ -557,10 +624,13 @@ class HybridDQNPPOAgent:
         # Calculate base reward
         base_reward = self.calculate_base_reward(current_state, next_state)
         
-        # Optimize reward using PPO
+        # Optimize reward using PPO - fix return value handling
         optimized_reward = self.ppo_optimizer.optimize_reward(
             current_state, base_reward, result['metrics']
         )
+        # Handle case where optimize_reward returns tuple (reward, value)
+        if isinstance(optimized_reward, tuple):
+            optimized_reward = optimized_reward[0]
         
         # Store experience in DQN replay buffer
         done = self._is_episode_done(next_state)
@@ -592,8 +662,9 @@ class HybridDQNPPOAgent:
                 wandb.log({"dqn/loss": dqn_loss, "train/global_step": self.total_steps})
         
         if self.total_steps % self.config.reward_optimization_freq == 0:
+            # Fix PPO update call - remove next_states and dones parameters
             ppo_loss = self.ppo_optimizer.update(
-                [current_state], [action], [optimized_reward], [next_state], [done]
+                [current_state], [action], [optimized_reward], [0.0], [0.0]  # dummy values, log_probs
             )
             if ppo_loss > 0:
                 wandb.log({"ppo/loss": ppo_loss, "train/global_step": self.total_steps})
@@ -735,4 +806,35 @@ class HybridDQNPPOAgent:
     
     def get_scaling_decision(self, state: np.ndarray) -> int:
         """Get scaling decision for current state (for inference)."""
-        return self.dqn_agent.select_action(state, training=False) 
+        return self.dqn_agent.select_action(state, training=False)
+
+    def step_with_external_state(self, external_state: np.ndarray) -> Dict[str, Any]:
+        """Execute one step using externally provided state (for test simulation)."""
+        # Use external state instead of get_state()
+        current_state = external_state
+
+        # Select action using DQN
+        action = self.dqn_agent.select_action(current_state, training=True)
+
+        # Execute action
+        result = self.execute_action(action)
+
+        # For reward calculation, we'll use current state and assume next state changes based on action
+        # This is a simplified version for testing
+        base_reward = self.calculate_base_reward(current_state, current_state)  # Simplified
+
+        # Optimize reward using PPO
+        optimized_reward = self.ppo_optimizer.optimize_reward(
+            current_state, base_reward, result['metrics']
+        )
+        # Handle case where optimize_reward returns tuple (reward, value)
+        if isinstance(optimized_reward, tuple):
+            optimized_reward = optimized_reward[0]
+
+        return {
+            'state': current_state,
+            'action': action,
+            'reward': optimized_reward,
+            'new_pods': self.mock_current_pods,  # Return new pod count to test simulation
+            'metrics': result['metrics']
+        } 
