@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nginx-production-servicemonitor
+  namespace: monitoring
+  labels:
+    release: kube-prom-stack
+    app: nginx-production
+    environment: production
+spec:
+  selector:
+    matchLabels:
+      app: nginx-production
+  namespaceSelector:
+    matchNames:
+      - default
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      honorLabels: true
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'nginx_.*'
+          action: keep 
