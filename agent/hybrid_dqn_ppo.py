@@ -228,14 +228,14 @@ class PPORewardOptimizer:
         self.optimizer = optim.Adam(self.network.parameters(), lr=config.ppo_learning_rate)
         
         # Bayesian optimizer for reward function tuning
-        # Define parameter bounds for dynamic scaling optimization
+        # Define parameter bounds for dynamic scaling optimization with aggressive latency focus
         param_bounds = {
-            'latency_weight': (0.2, 1.0),  # Higher priority on latency
+            'latency_weight': (0.8, 3.0),  # Much higher priority on latency (increased significantly)
             'cpu_weight': (0.2, 0.8),     # Higher CPU sensitivity
             'memory_weight': (0.05, 0.3),
             'cost_weight': (0.05, 0.4),   # Higher cost awareness
             'throughput_weight': (0.1, 0.5),  # More throughput focus
-            'latency_threshold': (0.15, 0.4),  # Tighter latency bounds
+            'latency_threshold': (0.1, 0.25),  # Much tighter latency bounds (reduced from 0.15-0.4)
             'cpu_threshold': (0.4, 0.7),       # Aligned with HPA thresholds (30%-70%)
             'cost_threshold': (0.5, 0.9),      # More cost-sensitive
             'scaling_reward': (0.1, 1.0),      # Reward for appropriate scaling
@@ -284,11 +284,20 @@ class PPORewardOptimizer:
         # Base reward with modulation
         reward = base_reward * (1 + modulation * 0.5)  # Reduce modulation impact
 
-        # Enhanced latency penalty (more sensitive)
-        latency_threshold = params.get('latency_threshold', 0.25)
-        latency_weight = params.get('latency_weight', 0.5)
+        # Enhanced latency penalty (much more aggressive)
+        latency_threshold = params.get('latency_threshold', 0.2)  # Lower default threshold
+        latency_weight = params.get('latency_weight', 1.5)  # Higher default weight
+
+        # Progressive penalty system for latency violations
         if latency > latency_threshold:
-            reward -= latency_weight * (latency - latency_threshold) * 2.0
+            violation_severity = (latency - latency_threshold) / latency_threshold
+            # Exponential penalty for increasing latency violations
+            latency_penalty = latency_weight * violation_severity * (1.0 + violation_severity ** 2) * 5.0
+            reward -= latency_penalty
+
+        # Additional severe penalty for critical latency violations
+        if latency > 0.5:  # Critical latency threshold
+            reward -= latency_weight * 10.0  # Large fixed penalty
 
         # Throughput bonus (encourage high throughput)
         throughput_weight = params.get('throughput_weight', 0.3)
@@ -407,7 +416,22 @@ class HybridDQNPPOAgent:
 
         # Metrics tracking
         self.metrics_callback = AutoscalingMetricsCallback()
-        
+
+        # Enhanced throughput tracking
+        self.throughput_history = []
+        self.request_history = []
+        self.response_time_history = []
+        self.success_rate_history = []
+        self.bandwidth_history = []
+        self.step_timestamps = []
+
+        # Performance metrics
+        self.current_rps = 0.0
+        self.peak_rps = 0.0
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
+
         # Initialize WandB
         self._init_wandb()
         
@@ -437,14 +461,15 @@ class HybridDQNPPOAgent:
     def get_state(self) -> np.ndarray:
         """Get current cluster state."""
         if self.mock_mode:
-            # Return mock state for testing
+            # Return mock state for testing - ensure 7 dimensions to match config
             return np.array([
                 np.random.uniform(0.1, 0.8),  # CPU
                 np.random.uniform(0.1, 0.7),  # Memory
                 np.random.uniform(0.05, 0.3),  # Latency
                 np.random.uniform(0.2, 0.6),  # Pods
                 np.random.uniform(0.0, 0.2),  # Queue length
-                np.random.uniform(0.5, 0.9)   # Throughput
+                np.random.uniform(0.5, 0.9),  # Throughput
+                np.random.uniform(0.0, 1.0)   # Additional metric (7th dimension)
             ], dtype=np.float32)
         
         try:
@@ -463,7 +488,7 @@ class HybridDQNPPOAgent:
             return np.zeros(self.config.state_dim, dtype=np.float32)
     
     def execute_action(self, action: int) -> Dict[str, Any]:
-        """Execute scaling action and return metrics."""
+        """Execute scaling action and return metrics with enhanced throughput tracking."""
         if self.mock_mode:
             # Mock action execution for testing - FIX: Use tracked pod count
             current_replicas = self.mock_current_pods
@@ -476,20 +501,104 @@ class HybridDQNPPOAgent:
 
             # FIX: Update our tracked pod count
             self.mock_current_pods = new_replicas
-            
-            # Mock metrics
+
+            # Enhanced mock metrics with realistic throughput simulation
+            latency = np.random.uniform(0.05, 0.3)
+
+            # Simulate realistic throughput based on pod count and load
+            base_rps_per_pod = 25.0  # Base RPS capacity per pod
+            load_factor = np.random.uniform(0.7, 1.3)  # Variable load
+
+            # Calculate throughput with scaling effects
+            if new_replicas > current_replicas:  # Scaling up
+                # Temporary performance dip during scaling
+                throughput_factor = 0.8
+            elif new_replicas < current_replicas:  # Scaling down
+                # Potential overload
+                throughput_factor = 1.2 if new_replicas >= 2 else 1.5
+            else:
+                throughput_factor = 1.0
+
+            current_rps = (new_replicas * base_rps_per_pod * load_factor) / throughput_factor
+
+            # Apply latency penalty to throughput
+            if latency > 0.2:  # High latency reduces effective throughput
+                current_rps *= (0.5 - (latency - 0.2))
+
+            # Ensure reasonable bounds
+            current_rps = max(5.0, min(current_rps, new_replicas * 50.0))
+
+            # Update peak RPS tracking
+            self.peak_rps = max(self.peak_rps, current_rps)
+            self.current_rps = current_rps
+
+            # Simulate request success rate
+            success_rate = 0.99
+            if latency > 0.25:  # High latency correlates with failures
+                success_rate *= (1.0 - (latency - 0.25) * 2)
+            if new_replicas < 2 and current_rps > 40:  # Overload scenario
+                success_rate *= 0.9
+
+            success_rate = max(0.5, min(success_rate, 1.0))
+
+            # Calculate bandwidth (approximate)
+            avg_response_size_kb = 1.2  # Average response size
+            bandwidth_mbps = (current_rps * avg_response_size_kb * 8) / 1000  # Convert to Mbps
+
+            # Store historical data
+            import time
+            current_time = time.time()
+            self.step_timestamps.append(current_time)
+            self.throughput_history.append(current_rps)
+            self.response_time_history.append(latency)
+            self.success_rate_history.append(success_rate)
+            self.bandwidth_history.append(bandwidth_mbps)
+
+            # Keep only recent history (last 100 steps)
+            max_history = 100
+            if len(self.throughput_history) > max_history:
+                self.step_timestamps = self.step_timestamps[-max_history:]
+                self.throughput_history = self.throughput_history[-max_history:]
+                self.response_time_history = self.response_time_history[-max_history:]
+                self.success_rate_history = self.success_rate_history[-max_history:]
+                self.bandwidth_history = self.bandwidth_history[-max_history:]
+
+            # Enhanced metrics with throughput data
             metrics = {
-                'latency': np.random.uniform(0.05, 0.3),
-                'throughput': np.random.uniform(0.6, 0.9),
+                'latency': latency,
+                'throughput': current_rps / 100.0,  # Normalized for compatibility
                 'cost': new_replicas / self.k8s_api.max_pods,
-                'queue_length': np.random.uniform(0.0, 0.2)
+                'queue_length': np.random.uniform(0.0, 0.2),
+                # New throughput-specific metrics
+                'requests_per_second': current_rps,
+                'peak_rps': self.peak_rps,
+                'success_rate': success_rate,
+                'bandwidth_mbps': bandwidth_mbps,
+                'response_time_p95': latency * np.random.uniform(1.5, 2.5),
+                'response_time_p99': latency * np.random.uniform(2.5, 4.0),
+                'total_requests': self.total_requests + current_rps,
+                'successful_requests': self.successful_requests + (current_rps * success_rate),
+                'failed_requests': self.failed_requests + (current_rps * (1 - success_rate))
             }
-            
+
+            # Update counters
+            self.total_requests += current_rps
+            self.successful_requests += (current_rps * success_rate)
+            self.failed_requests += (current_rps * (1 - success_rate))
+
             return {
                 'action': action,
                 'replicas': new_replicas,
                 'metrics': metrics,
-                'cluster_state': {}
+                'cluster_state': {},
+                'throughput_data': {
+                    'current_rps': current_rps,
+                    'peak_rps': self.peak_rps,
+                    'avg_rps_1min': np.mean(self.throughput_history[-6:]) if len(self.throughput_history) >= 6 else current_rps,
+                    'avg_rps_5min': np.mean(self.throughput_history[-30:]) if len(self.throughput_history) >= 30 else current_rps,
+                    'success_rate': success_rate,
+                    'bandwidth_mbps': bandwidth_mbps
+                }
             }
         
         try:
@@ -537,7 +646,7 @@ class HybridDQNPPOAgent:
             }
     
     def calculate_base_reward(self, prev_state: np.ndarray, current_state: np.ndarray) -> float:
-        """Calculate base reward from state transition with dynamic scaling incentives."""
+        """Calculate base reward from state transition with aggressive latency focus."""
         # Ensure we have the right number of state dimensions
         if len(current_state) >= 4:
             cpu, memory, latency, pods = current_state[:4]
@@ -552,15 +661,17 @@ class HybridDQNPPOAgent:
 
         reward = 0.0
 
-        # 1. SLA Compliance Rewards (primary objective)
-        if latency < 0.2:  # Excellent SLA
-            reward += 2.0
-        elif latency < 0.3:  # Good SLA
-            reward += 1.0
-        elif latency < 0.5:  # Acceptable SLA
-            reward += 0.3
-        else:  # SLA violation
-            reward -= 2.0
+        # 1. Aggressive SLA Compliance Rewards/Penalties (primary objective with much higher sensitivity)
+        if latency < 0.15:  # Excellent SLA (tighter threshold)
+            reward += 5.0  # Higher reward for excellent latency
+        elif latency < 0.2:  # Good SLA (tighter threshold)
+            reward += 2.5  # Increased reward
+        elif latency < 0.3:  # Acceptable SLA
+            reward += 0.5  # Reduced reward for acceptable
+        elif latency < 0.5:  # Poor SLA
+            reward -= 3.0  # Significant penalty
+        else:  # Critical SLA violation
+            reward -= 8.0  # Severe penalty for critical violations
 
         # 2. Resource Efficiency Rewards (target 40-70% CPU - aligned with HPA thresholds)
         if 0.4 <= cpu <= 0.7:  # Optimal range - matches rule-based agent targets
@@ -577,19 +688,22 @@ class HybridDQNPPOAgent:
         latency_change = latency - prev_latency
         pod_change = pods - prev_pods
 
-        # Reward scaling up when needed (high CPU/latency) - aligned with 50% HPA threshold
-        if pod_change > 0 and (cpu > 0.5 or latency > 0.25):
+        # Reward scaling up when needed (prioritizing latency) - more latency-focused
+        if pod_change > 0 and (latency > 0.2 or cpu > 0.5):  # Latency threshold first
+            if latency > 0.25:  # High latency gets bigger reward for scaling up
+                reward += 2.0
+            else:
+                reward += 1.0
+
+        # Reward scaling down when appropriate (very conservative with latency)
+        elif pod_change < 0 and (cpu < 0.3 and latency < 0.15):  # Much stricter latency requirement
             reward += 1.0
 
-        # Reward scaling down when appropriate (low CPU/latency) - aligned with 30% threshold
-        elif pod_change < 0 and (cpu < 0.3 and latency < 0.2):
-            reward += 1.0
-
-        # Penalize unnecessary scaling
-        elif pod_change > 0 and cpu < 0.3:  # Scaling up when not needed
+        # Penalize unnecessary or harmful scaling (latency-aware)
+        elif pod_change > 0 and cpu < 0.3 and latency < 0.2:  # Scaling up when not needed
             reward -= 1.5
-        elif pod_change < 0 and cpu > 0.7:  # Scaling down when overloaded
-            reward -= 1.5
+        elif pod_change < 0 and (cpu > 0.7 or latency > 0.2):  # Scaling down when risky for latency
+            reward -= 3.0  # Increased penalty for risky scale-down
 
         # 4. Cost Efficiency (penalize excessive pods)
         pod_cost_penalty = pods * 0.1  # Small penalty per pod
@@ -701,8 +815,8 @@ class HybridDQNPPOAgent:
         logger.info(f"Episode {self.episode_count} completed")
     
     def _log_metrics(self, action: int, reward: float, metrics: Dict[str, float]):
-        """Log metrics to WandB."""
-        wandb.log({
+        """Log metrics to WandB with enhanced throughput tracking."""
+        wandb_metrics = {
             "actions/scale_up": 1 if action == 0 else 0,
             "actions/scale_down": 1 if action == 1 else 0,
             "actions/no_change": 1 if action == 2 else 0,
@@ -712,7 +826,118 @@ class HybridDQNPPOAgent:
             "metrics/cost": metrics['cost'],
             "metrics/queue_length": metrics['queue_length'],
             "train/global_step": self.total_steps
-        })
+        }
+
+        # Add enhanced throughput metrics if available
+        if 'requests_per_second' in metrics:
+            wandb_metrics.update({
+                "throughput/requests_per_second": metrics['requests_per_second'],
+                "throughput/peak_rps": metrics['peak_rps'],
+                "throughput/success_rate": metrics['success_rate'],
+                "throughput/bandwidth_mbps": metrics['bandwidth_mbps'],
+                "performance/response_time_p95": metrics.get('response_time_p95', 0),
+                "performance/response_time_p99": metrics.get('response_time_p99', 0)
+            })
+
+        wandb.log(wandb_metrics)
+
+    def export_throughput_metrics(self, output_dir: str = "monitoring", test_id: str = None):
+        """Export throughput metrics to CSV files for analysis."""
+        if not self.throughput_history:
+            logger.warning("No throughput data to export")
+            return
+
+        import csv
+        import os
+        from datetime import datetime
+
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Generate test ID if not provided
+        if test_id is None:
+            test_id = f"hybrid_dqn_ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Export throughput metrics
+        throughput_file = os.path.join(output_dir, f"throughput_metrics_{test_id}.csv")
+
+        with open(throughput_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp", "agent_name", "instantaneous_rps", "avg_rps_1min",
+                "avg_rps_5min", "peak_rps", "throughput_efficiency",
+                "request_success_rate", "bandwidth_utilization_mbps"
+            ])
+
+            # Calculate CPU utilization (mock for now)
+            cpu_utilization = self.mock_current_pods / self.k8s_api.max_pods * 100
+
+            for i, timestamp in enumerate(self.step_timestamps):
+                if i < len(self.throughput_history):
+                    current_rps = self.throughput_history[i]
+                    success_rate = self.success_rate_history[i] if i < len(self.success_rate_history) else 0.95
+                    bandwidth = self.bandwidth_history[i] if i < len(self.bandwidth_history) else 0
+
+                    # Calculate moving averages
+                    start_1min = max(0, i - 5)  # Last 6 points (1 minute)
+                    start_5min = max(0, i - 29)  # Last 30 points (5 minutes)
+
+                    avg_rps_1min = np.mean(self.throughput_history[start_1min:i+1])
+                    avg_rps_5min = np.mean(self.throughput_history[start_5min:i+1])
+
+                    # Throughput efficiency (RPS per CPU%)
+                    throughput_efficiency = current_rps / cpu_utilization if cpu_utilization > 0 else 0
+
+                    writer.writerow([
+                        int(timestamp), "hybrid_dqn_ppo", f"{current_rps:.1f}",
+                        f"{avg_rps_1min:.1f}", f"{avg_rps_5min:.1f}", f"{self.peak_rps:.1f}",
+                        f"{throughput_efficiency:.3f}", f"{success_rate:.4f}", f"{bandwidth:.2f}"
+                    ])
+
+        # Export Prometheus-style metrics
+        prometheus_file = os.path.join(output_dir, f"prometheus_metrics_{test_id}.csv")
+
+        with open(prometheus_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp", "requests_per_second", "total_requests", "successful_requests",
+                "failed_requests", "response_time_p50", "response_time_p95",
+                "response_time_p99", "bytes_transferred", "connection_rate"
+            ])
+
+            cumulative_requests = 0
+            for i, timestamp in enumerate(self.step_timestamps):
+                if i < len(self.throughput_history):
+                    current_rps = self.throughput_history[i]
+                    success_rate = self.success_rate_history[i] if i < len(self.success_rate_history) else 0.95
+                    response_time = self.response_time_history[i] if i < len(self.response_time_history) else 0.1
+
+                    # Calculate cumulative metrics
+                    cumulative_requests += current_rps
+                    successful_requests = int(cumulative_requests * success_rate)
+                    failed_requests = int(cumulative_requests * (1 - success_rate))
+
+                    # Response time percentiles
+                    response_time_p50 = response_time
+                    response_time_p95 = response_time * 2.0
+                    response_time_p99 = response_time * 3.5
+
+                    # Bytes transferred (estimate)
+                    avg_response_size = 1200  # bytes
+                    bytes_transferred = int(current_rps * avg_response_size)
+
+                    writer.writerow([
+                        int(timestamp), f"{current_rps:.1f}", int(cumulative_requests),
+                        successful_requests, failed_requests, f"{response_time_p50:.3f}",
+                        f"{response_time_p95:.3f}", f"{response_time_p99:.3f}",
+                        bytes_transferred, f"{current_rps:.1f}"
+                    ])
+
+        logger.info(f"Throughput metrics exported:")
+        logger.info(f"  📊 Throughput data: {throughput_file}")
+        logger.info(f"  🌐 Prometheus data: {prometheus_file}")
+
+        return throughput_file, prometheus_file
     
     def train(self, total_steps: int = 50000):
         """Train the hybrid agent."""
@@ -737,6 +962,14 @@ class HybridDQNPPOAgent:
             raise
         finally:
             self.save_models()
+
+            # Export throughput metrics for analysis
+            try:
+                self.export_throughput_metrics()
+                logger.info("Throughput metrics exported successfully")
+            except Exception as e:
+                logger.warning(f"Failed to export throughput metrics: {e}")
+
             wandb.finish()
     
     def _evaluate(self):

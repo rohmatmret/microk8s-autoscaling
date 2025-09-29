@@ -78,14 +78,14 @@ class HybridMicroK8sEnv(gym.Env):
             'memory_utilization': []
         }
         
-        # Reward function parameters (can be overridden by PPO)
+        # Reward function parameters with aggressive latency focus (can be overridden by PPO)
         self.reward_params = {
-            'latency_weight': 0.5,
+            'latency_weight': 2.0,  # Increased from 0.5 to 2.0 for much higher latency sensitivity
             'cpu_weight': 0.2,
             'memory_weight': 0.15,
             'cost_weight': 0.1,
             'throughput_weight': 0.05,
-            'latency_threshold': 0.3,
+            'latency_threshold': 0.2,  # Decreased from 0.3 to 0.2 for stricter latency requirements
             'cpu_threshold': 0.7,
             'cost_threshold': 0.8
         }
@@ -241,13 +241,17 @@ class HybridMicroK8sEnv(gym.Env):
         # Base reward calculation
         reward = 0.0
         
-        # Latency reward (primary concern)
-        if latency < self.reward_params['latency_threshold']:
-            reward += self.reward_params['latency_weight'] * 2.0
-        elif latency < 0.6:
-            reward += self.reward_params['latency_weight'] * 1.0
-        else:
-            reward -= self.reward_params['latency_weight'] * 2.0
+        # Aggressive latency reward system (primary concern with exponential penalties)
+        if latency < 0.15:  # Excellent latency
+            reward += self.reward_params['latency_weight'] * 3.0
+        elif latency < self.reward_params['latency_threshold']:  # Good latency
+            reward += self.reward_params['latency_weight'] * 1.5
+        elif latency < 0.3:  # Acceptable but penalized
+            reward -= self.reward_params['latency_weight'] * 1.0
+        elif latency < 0.5:  # Poor latency - significant penalty
+            reward -= self.reward_params['latency_weight'] * 3.0
+        else:  # Critical latency violation - severe penalty
+            reward -= self.reward_params['latency_weight'] * 6.0
         
         # CPU utilization penalty
         if cpu > self.reward_params['cpu_threshold']:

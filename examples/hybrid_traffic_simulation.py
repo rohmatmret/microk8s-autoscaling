@@ -509,6 +509,16 @@ class AgentPerformanceTester:
             logger.error(f"Error during test execution: {e}")
 
         logger.info(f"Completed test: {agent_type} on {scenario.name} - {len(metrics_history)} metrics collected")
+
+        # Export throughput metrics for hybrid agents
+        if hasattr(agent, 'export_throughput_metrics') and hasattr(agent, 'throughput_history'):
+            try:
+                test_id = f"{agent_type}_{scenario.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                agent.export_throughput_metrics(output_dir="monitoring", test_id=test_id)
+                logger.info(f"Throughput metrics exported for {agent_type}")
+            except Exception as e:
+                logger.warning(f"Failed to export throughput metrics for {agent_type}: {e}")
+
         return metrics_history
 
     def _calculate_reward(self, cpu_util: float, response_time: float, pod_count: int) -> float:

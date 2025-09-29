@@ -1,0 +1,86 @@
+method: bayes
+metric:
+  name: eval/sla_violations_normalized
+  goal: minimize
+early_terminate:
+  type: hyperband
+  min_iter: 10
+  eta: 2
+parameters:
+  # Primary latency-focused parameters
+  latency_weight:
+    distribution: uniform
+    min: 1.0
+    max: 5.0
+  latency_threshold:
+    distribution: uniform
+    min: 0.1
+    max: 0.3
+  latency_penalty_multiplier:
+    distribution: uniform
+    min: 2.0
+    max: 10.0
+
+  # Learning rates - critical for convergence
+  dqn_learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-05
+    max: 0.01
+  ppo_learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-05
+    max: 0.01
+
+  # Architecture parameters
+  hidden_dim:
+    values:
+    - 32
+    - 64
+    - 128
+    - 256
+  dqn_buffer_size:
+    values:
+    - 10000
+    - 50000
+    - 100000
+    - 200000
+
+  # Training dynamics
+  dqn_epsilon_decay:
+    distribution: uniform
+    min: 0.99
+    max: 0.999
+  dqn_epsilon_end:
+    distribution: uniform
+    min: 0.05
+    max: 0.2
+  reward_optimization_freq:
+    values:
+    - 50
+    - 100
+    - 200
+    - 500
+
+  # PPO specific parameters
+  ppo_clip_range:
+    distribution: uniform
+    min: 0.1
+    max: 0.3
+  ppo_ent_coef:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.1
+
+  # Additional reward parameters for fine-tuning
+  cpu_weight:
+    distribution: uniform
+    min: 0.1
+    max: 0.8
+  cost_weight:
+    distribution: uniform
+    min: 0.05
+    max: 0.4
+  throughput_weight:
+    distribution: uniform
+    min: 0.05
+    max: 0.5
