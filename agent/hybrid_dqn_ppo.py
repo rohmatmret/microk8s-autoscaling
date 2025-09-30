@@ -395,8 +395,35 @@ class PPORewardOptimizer:
 
 class HybridDQNPPOAgent:
     """Hybrid DQN-PPO agent for adaptive autoscaling."""
-    
-    def __init__(self, config: HybridConfig, k8s_api: KubernetesAPI, mock_mode: bool = False):
+
+    def __init__(self, config: HybridConfig, k8s_api: KubernetesAPI, mock_mode: bool = False,
+                 load_optimized_params: str = None):
+        """
+        Initialize Hybrid DQN-PPO agent.
+
+        Args:
+            config: Hybrid configuration
+            k8s_api: Kubernetes API instance
+            mock_mode: Whether to run in mock mode
+            load_optimized_params: Path to JSON file with optimized DQN parameters
+        """
+        # Load optimized parameters if provided
+        if load_optimized_params:
+            import json
+            try:
+                with open(load_optimized_params, 'r') as f:
+                    optimized_params = json.load(f)
+                logger.info(f"Loading optimized DQN parameters from {load_optimized_params}")
+
+                # Update DQN config parameters
+                for key, value in optimized_params.items():
+                    dqn_key = f"dqn_{key}"
+                    if hasattr(config, dqn_key):
+                        setattr(config, dqn_key, value)
+                        logger.info(f"Updated {dqn_key}: {value}")
+            except Exception as e:
+                logger.error(f"Failed to load optimized parameters: {e}")
+
         self.config = config
         self.k8s_api = k8s_api
         self.mock_mode = mock_mode

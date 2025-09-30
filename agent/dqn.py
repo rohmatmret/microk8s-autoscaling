@@ -174,31 +174,41 @@ class DQNAgent:
     def _init_model(self, config: Dict[str, Any]):
         """Initialize DQN model with exploration tracking."""
         try:
+            # Extract network architecture parameters
+            net_arch_size = config.get('net_arch_size', 64)
+            net_arch_layers = config.get('net_arch_layers', 2)
+            net_arch = [net_arch_size] * net_arch_layers
+
+            # Handle learning rate - can be float or function
+            learning_rate = config.get('learning_rate', 0.0005)
+            if isinstance(learning_rate, float):
+                # Use linear schedule if single learning rate provided
+                learning_rate = get_linear_fn(learning_rate, learning_rate * 0.2, 1.0)
+
             self.model = DQN(
                 policy=MlpPolicy,
                 env=self.env,
-                # learning_rate=config.get('learning_rate', 0.0005),  
-                learning_rate = get_linear_fn(0.0005, 0.0001, 1.0),
-                buffer_size=config.get('buffer_size', 100000),      # Larger buffer to remember scaling decisions
-                batch_size=config.get('batch_size', 64),           # Smaller batch for more frequent updates
-                gamma=0.99,                                        # Lower gamma to focus on immediate scaling needs
-                tau=0.1,                                       # Higher tau for faster policy updates
-                train_freq=4,                                      # Train every 4 steps
-                gradient_steps=2,
-                learning_starts=5000,                              # Start learning after collecting some scaling experiences
-                target_update_interval=2000,                       # Update target network more frequently
-                exploration_fraction=0.2,                          # Longer exploration period
-                exploration_initial_eps=1.0,                       # Start with full exploration
-                exploration_final_eps=0.07,                         # Keep some exploration for adapting to traffic changes
-                max_grad_norm=10,
+                learning_rate=learning_rate,
+                buffer_size=config.get('buffer_size', 100000),
+                batch_size=config.get('batch_size', 64),
+                gamma=config.get('gamma', 0.99),
+                tau=config.get('tau', 0.1),
+                train_freq=config.get('train_freq', 4),
+                gradient_steps=config.get('gradient_steps', 2),
+                learning_starts=config.get('learning_starts', 5000),
+                target_update_interval=config.get('target_update_interval', 2000),
+                exploration_fraction=config.get('exploration_fraction', 0.2),
+                exploration_initial_eps=1.0,
+                exploration_final_eps=config.get('exploration_final_eps', 0.07),
+                max_grad_norm=config.get('max_grad_norm', 10),
                 verbose=1,
                 seed=config.get('seed', 42),
                 tensorboard_log=f"{self.model_dir}/tensorboard",
                 policy_kwargs=dict(
-                    net_arch=[64, 64],                            # Simpler network for faster learning
+                    net_arch=net_arch,
                     activation_fn=torch.nn.ReLU
                 ),
-                device = "auto",
+                device="auto",
                 optimize_memory_usage=False,
             )
              
@@ -409,23 +419,82 @@ def main():
         parser.add_argument('--simulate', action='store_true', help='Use simulated environment')
         parser.add_argument('--timesteps', type=int, default=200000, help='Training timesteps')
         parser.add_argument('--eval-episodes', type=int, default=20, help='Evaluation episodes')
+        parser.add_argument('--traffic-seed', type=int, default=42, help='Random seed for traffic simulator (default: 42)')
+
+        # Optimizable hyperparameters
         parser.add_argument('--learning-rate', type=float, default=0.0005, help='Learning rate')
+        parser.add_argument('--buffer-size', type=int, default=100000, help='Replay buffer size')
         parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
+        parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+        parser.add_argument('--tau', type=float, default=0.1, help='Soft update coefficient')
+        parser.add_argument('--train-freq', type=int, default=4, help='Training frequency')
+        parser.add_argument('--gradient-steps', type=int, default=2, help='Gradient steps per update')
+        parser.add_argument('--learning-starts', type=int, default=5000, help='Steps before learning starts')
+        parser.add_argument('--target-update-interval', type=int, default=2000, help='Target network update interval')
+        parser.add_argument('--exploration-fraction', type=float, default=0.2, help='Exploration fraction')
+        parser.add_argument('--exploration-final-eps', type=float, default=0.07, help='Final exploration epsilon')
+        parser.add_argument('--max-grad-norm', type=int, default=10, help='Maximum gradient norm')
+        parser.add_argument('--net-arch-size', type=int, default=64, help='Network layer size')
+        parser.add_argument('--net-arch-layers', type=int, default=2, help='Number of network layers')
+
+        # Load optimized parameters from file
+        parser.add_argument('--load-optimized', type=str, help='Load optimized parameters from JSON file')
+
         args = parser.parse_args()
 
-        # Instantiate environments separately for training and evaluation
+        # Load optimized parameters if provided
+        if args.load_optimized:
+            import json
+            try:
+                with open(args.load_optimized, 'r') as f:
+                    optimized_params = json.load(f)
+                logger.info(f"Loading optimized parameters from {args.load_optimized}")
+                logger.info(f"Optimized parameters: {optimized_params}")
+
+                # Override command line args with optimized parameters
+                for key, value in optimized_params.items():
+                    # Convert hyphenated keys to underscore format
+                    arg_key = key.replace('_', '-')
+                    if hasattr(args, key):
+                        setattr(args, key, value)
+                        logger.info(f"Set {key}: {value}")
+            except Exception as e:
+                logger.error(f"Failed to load optimized parameters: {e}")
+
+        # Instantiate environments separately for training and evaluation with consistent seed
         if args.simulate:
-            env = MicroK8sEnvSimulated()
+            env = MicroK8sEnvSimulated(seed=args.traffic_seed)
         else:
             env = MicroK8sEnv()
 
+        # Prepare configuration dictionary
+        config = {
+            'learning_rate': args.learning_rate,
+            'buffer_size': args.buffer_size,
+            'batch_size': args.batch_size,
+            'gamma': args.gamma,
+            'tau': args.tau,
+            'train_freq': args.train_freq,
+            'gradient_steps': args.gradient_steps,
+            'learning_starts': args.learning_starts,
+            'target_update_interval': args.target_update_interval,
+            'exploration_fraction': args.exploration_fraction,
+            'exploration_final_eps': args.exploration_final_eps,
+            'max_grad_norm': args.max_grad_norm,
+            'net_arch_size': args.net_arch_size,
+            'net_arch_layers': args.net_arch_layers
+        }
+
+        logger.info("Training with parameters:")
+        for key, value in config.items():
+            logger.info(f"  {key}: {value}")
+
         # Initialize agent with both environments and custom parameters
         agent = DQNAgent(
-            env=env, 
-            environment=env, 
+            env=env,
+            environment=env,
             is_simulated=args.simulate,
-            learning_rate=args.learning_rate,
-            batch_size=args.batch_size
+            **config
         )
     
         agent.load()
