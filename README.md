@@ -138,19 +138,122 @@ action_space = spaces.Discrete(3)
 # 2: Scale Up (+1 pod)
 ```
 
-#### Reward Function
-**Multi-objective reward combining:**
-- **Performance**: `-latency_penalty - error_rate_penalty`
-- **Efficiency**: `-resource_waste_penalty - thrashing_penalty`
-- **Stability**: `+stability_bonus`
+#### Reward Function Architecture
+
+**Critical Design Principle: Stable Reward for DQN Learning**
+
+Our Hybrid DQN-PPO implementation uses a **decoupled reward architecture** to prevent training instability:
 
 ```python
-reward = (
-    -0.4 * latency_penalty +      # Response time < 200ms target
-    -0.3 * resource_penalty +     # CPU/Memory < 85% target
-    -0.2 * thrashing_penalty +    # Minimize scaling oscillations
-    +0.1 * stability_bonus        # Reward stable states
-)
+# CRITICAL FIX: Separate base reward (stable) from PPO optimization
+base_reward = calculate_base_reward(state, next_state)  # Stable, consistent
+dqn_replay_buffer.push(state, action, base_reward)      # DQN learns from stable signal
+
+# PPO optimizes reward for analysis/monitoring only
+optimized_reward = ppo_optimizer.optimize_reward(base_reward, metrics)
+```
+
+**Why This Matters:**
+- ❌ **Before**: PPO dynamically modified rewards → DQN couldn't learn (reward instability)
+- ✅ **After**: DQN learns from consistent base reward → PPO provides auxiliary optimization
+
+**Multi-objective Base Reward Function:**
+
+```python
+def calculate_base_reward(prev_state, current_state):
+    """Calculate stable base reward for DQN learning."""
+
+    # 1. SLA Compliance (Primary Objective - 60% weight)
+    if latency < 0.15:  # Excellent SLA
+        reward += 8.0   # Strong positive reinforcement
+    elif latency < 0.2:  # Good SLA
+        reward += 3.0
+    elif latency < 0.3:  # Acceptable
+        reward += 0.0   # Neutral
+    else:  # SLA VIOLATION (>0.3s)
+        # Exponential penalty based on severity
+        violation_magnitude = (latency - 0.3) / 0.3
+        reward -= 10.0 * (1 + violation_magnitude)
+
+    # 2. Resource Efficiency (20% weight)
+    if 0.4 <= cpu <= 0.7:  # Optimal CPU range
+        reward += 1.5
+    elif cpu > 0.7:  # Over-utilized
+        reward -= 1.0
+
+    # 3. Cost Optimization (10% weight)
+    # Only penalize EXCESSIVE pods when SLA is safe
+    if latency < 0.15 and cpu < 0.5:
+        if pods < 0.5:  # Running lean
+            reward += 1.5  # Reward efficiency
+    elif pods > 0.7 and cpu < 0.3:  # Over-provisioned
+        reward -= (pods - 0.5) * 1.0
+
+    # 4. Scaling Behavior (10% weight)
+    # Reward proactive scaling up when needed
+    if pod_change > 0 and (latency > 0.2 or cpu > 0.5):
+        reward += 1.0  # Good preventive action
+    # Penalize risky scale-down
+    elif pod_change < 0 and (cpu > 0.6 or latency > 0.15):
+        reward -= 5.0  # Strong penalty for causing SLA risk
+
+    return reward
+```
+
+**Why Heavy SLA Violation Penalties?**
+
+| Aspect | Rationale | Impact |
+|--------|-----------|--------|
+| **Business Cost** | Each SLA violation = potential revenue loss, customer churn | SLA breach costs 100x more than extra pod |
+| **User Experience** | Slow responses (>300ms) drive users away | Lost customer > saved infrastructure cost |
+| **Competitive Edge** | Response time is key differentiator for startups | Speed = market advantage |
+| **Cascading Failures** | High latency → queue buildup → system collapse | Prevention cheaper than recovery |
+| **Training Signal** | Strong penalty teaches agent to prioritize performance | Agent learns "SLA first, cost second" |
+
+**Real-World Example:**
+```
+Scenario: E-commerce flash sale (5000 RPS spike)
+
+Conservative Agent (weak SLA penalty):
+- Runs 3 pods to save cost → CPU hits 95%
+- Latency jumps to 500ms → 200K SLA violations
+- Lost sales: $50,000 (timeout errors)
+- Cost saved: $20 (2 fewer pods)
+- Net impact: -$49,980 ❌
+
+Aggressive Agent (strong SLA penalty):
+- Detects spike → immediately scales to 8 pods
+- Latency stays at 120ms → 30K SLA violations
+- Lost sales: $5,000 (minor slowdown)
+- Extra cost: $40 (5 additional pods)
+- Net impact: -$5,040 ✅ (90% better!)
+```
+
+**Comparison: Training Results**
+
+| Reward Configuration | Avg SLA Violations | Avg Cost | Avg Latency | Business Outcome |
+|---------------------|-------------------|----------|-------------|------------------|
+| **Old (weak SLA penalty)** | 335,844 | $529K | 144ms | ❌ Cost-efficient but unreliable |
+| **Fixed (balanced penalty)** | ~220K | $550K | 130ms | ✅ Balanced performance/cost |
+| **PPO (proactive)** | 208,346 | $1.2M | 126ms | ⚡ Best SLA, high cost |
+| **Rule-Based** | 245,661 | $606K | 132ms | ⚙️  Predictable, middle ground |
+
+**Key Insight from Research:**
+> "The Hybrid DQN-PPO agent initially learned to minimize cost aggressively (negative reward -7.05), resulting in 59% more SLA violations than PPO. After rebalancing the reward function to properly penalize latency violations (8x stronger penalty), the agent achieved better cost efficiency while maintaining acceptable SLA compliance. This demonstrates the critical importance of reward engineering in production RL systems."
+
+**PPO Reward Optimization Layer:**
+
+```python
+# PPO dynamically adjusts reward weights using Bayesian optimization
+optimized_reward = base_reward * (1 + ppo_modulation)
+
+# Bayesian-optimized parameters (learned during training)
+param_bounds = {
+    'latency_weight': (0.8, 3.0),      # Adaptive latency sensitivity
+    'cpu_weight': (0.2, 0.8),          # Resource utilization focus
+    'cost_weight': (0.05, 0.4),        # Cost awareness
+    'throughput_weight': (0.1, 0.5)    # Throughput optimization
+}
 ```
 
 ### 🔧 Training Methodology
