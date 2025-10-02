@@ -421,20 +421,24 @@ def main():
         parser.add_argument('--eval-episodes', type=int, default=20, help='Evaluation episodes')
         parser.add_argument('--traffic-seed', type=int, default=42, help='Random seed for traffic simulator (default: 42)')
 
-        # Optimizable hyperparameters
-        parser.add_argument('--learning-rate', type=float, default=0.0005, help='Learning rate')
-        parser.add_argument('--buffer-size', type=int, default=100000, help='Replay buffer size')
-        parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
-        parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-        parser.add_argument('--tau', type=float, default=0.1, help='Soft update coefficient')
+        # Optimizable hyperparameters - Using best parameters from optimization
+        # Best parameters found via Optuna optimization
+        # Source: /best_dqn_params_latest.json (project root)
+        # Optimization result: Best value = -4.0025 (converged)
+        # To re-optimize: python -m agent.dqn_optimization --simulate --trials 20
+        parser.add_argument('--learning-rate', type=float, default=0.0003320947521799842, help='Learning rate')
+        parser.add_argument('--buffer-size', type=int, default=140978, help='Replay buffer size')
+        parser.add_argument('--batch-size', type=int, default=256, help='Batch size')
+        parser.add_argument('--gamma', type=float, default=0.9732108019691487, help='Discount factor')
+        parser.add_argument('--tau', type=float, default=0.0380978024125337, help='Soft update coefficient')
         parser.add_argument('--train-freq', type=int, default=4, help='Training frequency')
-        parser.add_argument('--gradient-steps', type=int, default=2, help='Gradient steps per update')
-        parser.add_argument('--learning-starts', type=int, default=5000, help='Steps before learning starts')
-        parser.add_argument('--target-update-interval', type=int, default=2000, help='Target network update interval')
-        parser.add_argument('--exploration-fraction', type=float, default=0.2, help='Exploration fraction')
-        parser.add_argument('--exploration-final-eps', type=float, default=0.07, help='Final exploration epsilon')
-        parser.add_argument('--max-grad-norm', type=int, default=10, help='Maximum gradient norm')
-        parser.add_argument('--net-arch-size', type=int, default=64, help='Network layer size')
+        parser.add_argument('--gradient-steps', type=int, default=1, help='Gradient steps per update')
+        parser.add_argument('--learning-starts', type=int, default=5125, help='Steps before learning starts')
+        parser.add_argument('--target-update-interval', type=int, default=1049, help='Target network update interval')
+        parser.add_argument('--exploration-fraction', type=float, default=0.3025188836389893, help='Exploration fraction')
+        parser.add_argument('--exploration-final-eps', type=float, default=0.1448672884499737, help='Final exploration epsilon')
+        parser.add_argument('--max-grad-norm', type=int, default=16, help='Maximum gradient norm')
+        parser.add_argument('--net-arch-size', type=int, default=128, help='Network layer size')
         parser.add_argument('--net-arch-layers', type=int, default=2, help='Number of network layers')
 
         # Load optimized parameters from file

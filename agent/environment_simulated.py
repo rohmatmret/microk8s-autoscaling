@@ -57,9 +57,9 @@ class MicroK8sEnvSimulated(gym.Env):
         self.load_history = deque(maxlen=self.MAX_HISTORY_LENGTH)
         self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
         
-        # Observation space: [cpu, memory, latency, swap, nodes, load_mean, load_gradient]
+        # Observation space: [cpu, memory, latency, swap, nodes, load_mean, throughput]
         self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
+            low=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             high=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             dtype=np.float64
         )
@@ -398,8 +398,11 @@ class MicroK8sEnvSimulated(gym.Env):
                 self.load_history.extend([self.traffic_simulator.base_load] * self.MIN_HISTORY_LENGTH)
                 
             load_mean = np.mean(self.load_history) / 5000
-            load_gradient = self._calculate_load_gradient()
-            
+
+            # Calculate throughput (requests per second)
+            throughput = state.get("throughput", 0.0)
+            normalized_throughput = min(throughput / 1000.0, 1.0)  # Normalize assuming max 1000 RPS
+
             obs = np.array([
                 state["cpu"],
                 state["memory"] / 500e6,
@@ -407,7 +410,7 @@ class MicroK8sEnvSimulated(gym.Env):
                 state["swap"] / 200e6,
                 state["nodes"] / self.api.max_nodes,
                 load_mean,
-                load_gradient
+                normalized_throughput
             ], dtype=np.float32)
             
             logger.debug("Observation: %s", obs)
@@ -422,7 +425,7 @@ class MicroK8sEnvSimulated(gym.Env):
                 0.0,  # swap
                 1.0,  # nodes
                 0.0,  # load_mean
-                0.0   # load_gradient
+                0.0   # throughput
             ], dtype=np.float32)
 
     def _observe(self) -> np.ndarray:

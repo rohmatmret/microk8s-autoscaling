@@ -87,14 +87,18 @@ def objective(
     
     # Evaluate the agent
     avg_reward = agent.evaluate(episodes=eval_episodes)
-    
-    # Log to wandb
-    wandb.log({
-        "optuna/trial": trial.number,
-        "optuna/objective_value": avg_reward,
-        **{f"optuna/param_{k}": v for k, v in params.items()}
-    })
-    
+
+    # Log to wandb if initialized
+    if wandb.run is not None:
+        try:
+            wandb.log({
+                "optuna/trial": trial.number,
+                "optuna/objective_value": avg_reward,
+                **{f"optuna/param_{k}": v for k, v in params.items()}
+            })
+        except Exception as e:
+            logger.warning(f"Failed to log to wandb: {e}")
+
     return avg_reward
 
 def optimize_hyperparameters(
@@ -142,15 +146,16 @@ def optimize_hyperparameters(
     logger.info(f"Best value achieved: {best_value:.2f}")
     
     # Log optimization history to wandb
-    try:
-        trials_data = _get_trial_data(study)
-        
-        wandb.log({
-            "optuna/best_value": best_value,
-            "optuna/best_params": best_params,
-            "optuna/optimization_history": trials_data
-        })
-    except Exception as e:
-        logger.error(f"Error logging optimization history to wandb: {str(e)}")
+    if wandb.run is not None:
+        try:
+            trials_data = _get_trial_data(study)
+
+            wandb.log({
+                "optuna/best_value": best_value,
+                "optuna/best_params": best_params,
+                "optuna/optimization_history": trials_data
+            })
+        except Exception as e:
+            logger.error(f"Error logging optimization history to wandb: {str(e)}")
     
     return best_params 

@@ -196,15 +196,21 @@ class ImprovementCallback(BaseCallback):
         return sum([reward_improvement, stability_improvement, resource_improvement]) >= 2
 
 class PPOAgent:
-    """PPO agent for MicroK8s autoscaling."""
+    """PPO agent for MicroK8s autoscaling.
+
+    Default parameters are optimized via Optuna optimization.
+    Source: /best_ppo_params_latest.json (project root)
+    Optimization result: Best value = -3.4400 (converged)
+    To re-optimize: python -m agent.ppo_optimization --simulate --trials 20
+    """
 
     def __init__(
         self,
         environment: MicroK8sEnv,
-        learning_rate: float = 0.0003,
-        n_steps: int = 2048,
-        batch_size: int = 64,
-        gamma: float = 0.99,
+        learning_rate: float = 0.0001799454998195903,
+        n_steps: int = 3156,
+        batch_size: int = 256,
+        gamma: float = 0.9920186311406627,
         model_dir: str = "./models/ppo"
     ):
         self.env = environment
@@ -300,7 +306,18 @@ class PPOAgent:
         logger.info("Evaluation environment initialized.")
 
     def _initialize_model(self, learning_rate: float, n_steps: int, batch_size: int, gamma: float):
-        """Initializes the PPO model."""
+        """Initializes the PPO model with optimized parameters.
+
+        Optimized hyperparameters from /best_ppo_params_latest.json:
+        - gae_lambda: 0.9473714121408062
+        - clip_range: 0.19614066300807234
+        - n_epochs: 11
+        - ent_coef: 0.0020419888561576545
+        - vf_coef: 0.45570629287422937
+        - max_grad_norm: 0.9280948967769252
+
+        To load dynamically: Use --load-optimized best_ppo_params_latest.json
+        """
         # Fix learning rate by using linear schedule for better stability
         learning_rate_schedule = get_linear_fn(learning_rate, learning_rate * 0.1, 1.0)
 
@@ -311,13 +328,13 @@ class PPOAgent:
             n_steps=n_steps,
             batch_size=batch_size,
             gamma=gamma,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            n_epochs=10,
+            gae_lambda=0.9473714121408062,  # Optimized GAE lambda
+            clip_range=0.19614066300807234,  # Optimized clip range
+            n_epochs=11,  # Optimized number of epochs
             verbose=1,
-            ent_coef=0.01,  # Reduced entropy coefficient for more stable learning
-            vf_coef=0.5,    # Added value function coefficient
-            max_grad_norm=0.5,
+            ent_coef=0.0020419888561576545,  # Optimized entropy coefficient
+            vf_coef=0.45570629287422937,  # Optimized value function coefficient
+            max_grad_norm=0.9280948967769252,  # Optimized max gradient norm
             policy_kwargs=dict(
                 net_arch=[dict(pi=[64, 64], vf=[64, 64])],  # Separate networks for actor-critic
                 activation_fn=th.nn.Tanh  # Better activation for stability

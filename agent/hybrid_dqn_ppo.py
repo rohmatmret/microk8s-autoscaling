@@ -24,31 +24,45 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HybridConfig:
-    """Configuration for hybrid DQN-PPO agent."""
-    # DQN Configuration
-    dqn_learning_rate: float = 0.0005
-    dqn_buffer_size: int = 100000
-    dqn_batch_size: int = 64
-    dqn_gamma: float = 0.99
-    dqn_tau: float = 0.1
+    """Configuration for hybrid DQN-PPO agent.
+
+    Optimized hyperparameters from Optuna optimization:
+    - DQN: /best_dqn_params_latest.json (Best value: -4.0025, converged)
+      Re-optimize: python -m agent.dqn_optimization --simulate --trials 20
+    - PPO: /best_ppo_params_latest.json (Best value: -3.4400, converged)
+      Re-optimize: python -m agent.ppo_optimization --simulate --trials 20
+
+    To load optimized params dynamically:
+      hybrid_agent = HybridDQNPPOAgent(config, k8s_api,
+                                        load_optimized_params='best_dqn_params_latest.json')
+    """
+    # DQN Configuration - Using optimized parameters
+    dqn_learning_rate: float = 0.0003320947521799842
+    dqn_buffer_size: int = 140978
+    dqn_batch_size: int = 256
+    dqn_gamma: float = 0.9732108019691487
+    dqn_tau: float = 0.0380978024125337
     dqn_epsilon_start: float = 1.0
-    dqn_epsilon_end: float = 0.15  # Higher minimum exploration
+    dqn_epsilon_end: float = 0.1448672884499737
     dqn_epsilon_decay: float = 0.999  # Slower decay for sustained exploration
-    dqn_target_update_freq: int = 2000
+    dqn_target_update_freq: int = 1049
     
-    # PPO Configuration
-    ppo_learning_rate: float = 0.0003
-    ppo_n_steps: int = 2048
-    ppo_batch_size: int = 64
-    ppo_gamma: float = 0.99
-    ppo_gae_lambda: float = 0.95
-    ppo_clip_range: float = 0.2
-    ppo_ent_coef: float = 0.01
+    # PPO Configuration - Using optimized parameters
+    ppo_learning_rate: float = 0.0001799454998195903
+    ppo_n_steps: int = 3156
+    ppo_batch_size: int = 256
+    ppo_gamma: float = 0.9920186311406627
+    ppo_gae_lambda: float = 0.9473714121408062
+    ppo_clip_range: float = 0.19614066300807234
+    ppo_ent_coef: float = 0.0020419888561576545
+    ppo_vf_coef: float = 0.45570629287422937
+    ppo_max_grad_norm: float = 0.9280948967769252
+    ppo_n_epochs: int = 11
     
     # Hybrid Configuration
     reward_optimization_freq: int = 100
     batch_evaluation_steps: int = 50
-    state_dim: int = 7  # Fixed to match 7-dimensional state space from test simulation
+    state_dim: int = 7  # cpu, memory, latency, swap, nodes, load_mean, throughput
     action_dim: int = 3
     hidden_dim: int = 64
 
@@ -466,6 +480,11 @@ class HybridDQNPPOAgent:
         
     def _init_wandb(self):
         """Initialize WandB for experiment tracking."""
+        # Skip if already initialized (e.g., by wrapper)
+        if wandb.run is not None:
+            logger.info("WandB already initialized, skipping agent initialization")
+            return
+
         try:
             wandb.init(
                 project="microk8s_hybrid_autoscaling",
@@ -480,34 +499,61 @@ class HybridDQNPPOAgent:
                     "batch_evaluation_steps": self.config.batch_evaluation_steps
                 },
                 tags=["hybrid", "autoscaling", "DQN", "PPO"],
-                sync_tensorboard=True
+                sync_tensorboard=True,
+                mode="offline",  # Offline mode - sync later with: wandb sync ./wandb/run-xxx
+                reinit=True  # Allow reinitialization
             )
         except Exception as e:
             logger.warning(f"WandB initialization failed: {e}")
     
     def get_state(self) -> np.ndarray:
-        """Get current cluster state."""
+        """Get current cluster state with throughput metric."""
         if self.mock_mode:
-            # Return mock state for testing - ensure 7 dimensions to match config
+            # FIX: Maintain consistent state based on current pod count
+            # Calculate realistic state based on load and pod count
+            current_pods = self.mock_current_pods
+
+            # Simulate load (varies over time)
+            import time
+            time_factor = (time.time() % 3600) / 3600.0  # 0-1 over an hour
+            base_load = 500 + 300 * np.sin(time_factor * 2 * np.pi)  # Oscillating load
+
+            # Calculate metrics based on pod count and load
+            pod_capacity = 200  # RPS per pod
+            cpu_util = min(0.95, base_load / (current_pods * pod_capacity))
+            cpu_util = max(0.1, cpu_util)  # Keep in range
+
+            memory_util = 0.3 + cpu_util * 0.4  # Memory correlates with CPU
+            latency = 0.05 + max(0, (cpu_util - 0.7) * 0.4)  # Latency increases when overloaded
+            throughput = min(base_load, current_pods * pod_capacity) / 1000.0  # Normalized
+
             return np.array([
-                np.random.uniform(0.1, 0.8),  # CPU
-                np.random.uniform(0.1, 0.7),  # Memory
-                np.random.uniform(0.05, 0.3),  # Latency
-                np.random.uniform(0.2, 0.6),  # Pods
-                np.random.uniform(0.0, 0.2),  # Queue length
-                np.random.uniform(0.5, 0.9),  # Throughput
-                np.random.uniform(0.0, 1.0)   # Additional metric (7th dimension)
+                cpu_util,                       # CPU utilization (realistic)
+                memory_util,                    # Memory utilization (correlated)
+                latency,                        # Latency (increases with load)
+                cpu_util * 0.1,                 # Swap (minimal when healthy)
+                current_pods / 10.0,            # Normalized pod count
+                base_load / 1000.0,             # Load mean (normalized)
+                throughput                      # Throughput (RPS normalized)
             ], dtype=np.float32)
         
         try:
             cluster_state = self.k8s_api.get_cluster_state()
+
+            # Calculate throughput from history
+            throughput = 0.0
+            if len(self.throughput_history) > 0:
+                throughput = np.mean(self.throughput_history[-6:]) / 1000.0  # Normalize by max RPS
+                throughput = min(throughput, 1.0)
+
             state = np.array([
                 min(cluster_state["cpu"] / 100.0, 1.0),
                 min(cluster_state["memory"] / 1e9, 1.0),
                 min(cluster_state["latency"] / 0.2, 1.0),
-                min(cluster_state["pods"] / self.k8s_api.max_pods, 1.0),
-                0.0,  # Queue length (placeholder)
-                0.8   # Throughput (placeholder)
+                min(cluster_state.get("swap", 0) / 200e6, 1.0),
+                min(cluster_state.get("nodes", 1) / 10, 1.0),
+                0.5,        # Load mean (placeholder - could be calculated from load history)
+                throughput  # Throughput (from throughput_history)
             ], dtype=np.float32)
             return state
         except Exception as e:
@@ -688,17 +734,17 @@ class HybridDQNPPOAgent:
 
         reward = 0.0
 
-        # 1. Aggressive SLA Compliance Rewards/Penalties (primary objective with much higher sensitivity)
-        if latency < 0.15:  # Excellent SLA (tighter threshold)
-            reward += 5.0  # Higher reward for excellent latency
-        elif latency < 0.2:  # Good SLA (tighter threshold)
-            reward += 2.5  # Increased reward
-        elif latency < 0.3:  # Acceptable SLA
-            reward += 0.5  # Reduced reward for acceptable
-        elif latency < 0.5:  # Poor SLA
-            reward -= 3.0  # Significant penalty
-        else:  # Critical SLA violation
-            reward -= 8.0  # Severe penalty for critical violations
+        # 1. Balanced SLA rewards/penalties (not too extreme)
+        if latency < 0.15:  # Excellent SLA - meeting target
+            reward += 8.0  # Strong positive reinforcement
+        elif latency < 0.2:  # Good SLA
+            reward += 3.0  # Moderate reward
+        elif latency < 0.3:  # Acceptable
+            reward += 0.0  # Neutral
+        else:  # SLA violation (>0.3s is clearly bad)
+            # Exponential penalty based on severity
+            violation_magnitude = (latency - 0.3) / 0.3
+            reward -= 10.0 * (1 + violation_magnitude)
 
         # 2. Resource Efficiency Rewards (target 40-70% CPU - aligned with HPA thresholds)
         if 0.4 <= cpu <= 0.7:  # Optimal range - matches rule-based agent targets
@@ -726,15 +772,20 @@ class HybridDQNPPOAgent:
         elif pod_change < 0 and (cpu < 0.3 and latency < 0.15):  # Much stricter latency requirement
             reward += 1.0
 
-        # Penalize unnecessary or harmful scaling (latency-aware)
-        elif pod_change > 0 and cpu < 0.3 and latency < 0.2:  # Scaling up when not needed
+        # Penalize harmful scaling decisions
+        elif pod_change > 0 and cpu < 0.3 and latency < 0.15:  # Scaling up when not needed
             reward -= 1.5
-        elif pod_change < 0 and (cpu > 0.7 or latency > 0.2):  # Scaling down when risky for latency
-            reward -= 3.0  # Increased penalty for risky scale-down
+        elif pod_change < 0 and (cpu > 0.6 or latency > 0.15):  # Risky scale-down
+            reward -= 5.0  # Strong but not extreme penalty
 
-        # 4. Cost Efficiency (penalize excessive pods)
-        pod_cost_penalty = pods * 0.1  # Small penalty per pod
-        reward -= pod_cost_penalty
+        # 4. Balanced cost penalty (encourage efficiency without starving resources)
+        # Reward cost efficiency ONLY when SLA is safe
+        if latency < 0.15 and cpu < 0.5:  # Safe to optimize cost
+            if pods < 0.5:  # Running lean
+                reward += 1.5  # Reward efficiency
+        # Penalize waste (high pods + low utilization + good SLA)
+        elif pods > 0.7 and cpu < 0.3 and latency < 0.15:
+            reward -= (pods - 0.5) * 1.0  # Moderate penalty for over-provisioning
 
         # 5. Stability bonus (small reward for good steady state) - aligned with HPA targets
         if abs(pod_change) == 0 and 0.4 <= cpu <= 0.7 and latency < 0.3:
@@ -752,45 +803,49 @@ class HybridDQNPPOAgent:
         """Execute one step of the hybrid agent."""
         # Get current state
         current_state = self.get_state()
-        
+
         # Select action using DQN
         action = self.dqn_agent.select_action(current_state, training=True)
-        
+
         # Execute action
         result = self.execute_action(action)
-        
+
         # Get next state
         next_state = self.get_state()
-        
+
         # Calculate base reward
         base_reward = self.calculate_base_reward(current_state, next_state)
-        
-        # Optimize reward using PPO - fix return value handling
+
+        # CRITICAL FIX: DQN learns from STABLE base reward
+        # PPO only provides auxiliary signal for analysis, not for DQN training
+        dqn_reward = base_reward  # Stable reward for Q-learning
+
+        # PPO optimizes reward for performance tracking only
         optimized_reward = self.ppo_optimizer.optimize_reward(
             current_state, base_reward, result['metrics']
         )
         # Handle case where optimize_reward returns tuple (reward, value)
         if isinstance(optimized_reward, tuple):
             optimized_reward = optimized_reward[0]
-        
-        # Store experience in DQN replay buffer
+
+        # Store experience in DQN replay buffer with STABLE reward
         done = self._is_episode_done(next_state)
         self.dqn_agent.replay_buffer.push(
-            current_state, action, optimized_reward, next_state, done
+            current_state, action, dqn_reward, next_state, done  # Use base_reward, not optimized
         )
-        
-        # Update episode tracking
+
+        # Update episode tracking with optimized reward (for monitoring)
         self.current_episode_reward += optimized_reward
         self.current_episode_length += 1
         self.total_steps += 1
-        
+
         # Update PPO metrics
         self.ppo_optimizer.update_metrics(
             self.current_episode_reward, self.current_episode_length, result['metrics']
         )
-        
-        # Log metrics
-        self._log_metrics(action, optimized_reward, result['metrics'])
+
+        # Log both rewards for comparison
+        self._log_metrics(action, base_reward, optimized_reward, result['metrics'])
         
         # Check if episode is done
         if done:
@@ -799,21 +854,28 @@ class HybridDQNPPOAgent:
         # Periodic updates
         if self.total_steps % 10 == 0:  # Update DQN every 10 steps
             dqn_loss = self.dqn_agent.update(self.config.dqn_batch_size)
-            if dqn_loss > 0:
-                wandb.log({"dqn/loss": dqn_loss, "train/global_step": self.total_steps})
-        
+            if dqn_loss > 0 and wandb.run is not None:
+                try:
+                    wandb.log({"dqn/loss": dqn_loss, "train/global_step": self.total_steps})
+                except Exception as e:
+                    logger.warning(f"Failed to log DQN loss to wandb: {e}")
+
         if self.total_steps % self.config.reward_optimization_freq == 0:
             # Fix PPO update call - remove next_states and dones parameters
             ppo_loss = self.ppo_optimizer.update(
                 [current_state], [action], [optimized_reward], [0.0], [0.0]  # dummy values, log_probs
             )
-            if ppo_loss > 0:
-                wandb.log({"ppo/loss": ppo_loss, "train/global_step": self.total_steps})
+            if ppo_loss > 0 and wandb.run is not None:
+                try:
+                    wandb.log({"ppo/loss": ppo_loss, "train/global_step": self.total_steps})
+                except Exception as e:
+                    logger.warning(f"Failed to log PPO loss to wandb: {e}")
         
         return {
             'state': current_state,
             'action': action,
-            'reward': optimized_reward,
+            'reward': base_reward,  # Return stable reward
+            'optimized_reward': optimized_reward,  # Also track optimized
             'next_state': next_state,
             'done': done,
             'metrics': result['metrics']
@@ -826,47 +888,59 @@ class HybridDQNPPOAgent:
     def _end_episode(self):
         """Handle episode end."""
         self.episode_count += 1
-        
+
         # Log episode metrics
-        wandb.log({
-            "episode/reward": self.current_episode_reward,
-            "episode/length": self.current_episode_length,
-            "episode/count": self.episode_count,
-            "train/global_step": self.total_steps
-        })
-        
+        if wandb.run is not None:
+            try:
+                wandb.log({
+                    "episode/reward": self.current_episode_reward,
+                    "episode/length": self.current_episode_length,
+                    "episode/count": self.episode_count,
+                    "train/global_step": self.total_steps
+                })
+            except Exception as e:
+                logger.warning(f"Failed to log episode metrics to wandb: {e}")
+
         # Reset episode tracking
         self.current_episode_reward = 0.0
         self.current_episode_length = 0
-        
+
         logger.info(f"Episode {self.episode_count} completed")
     
-    def _log_metrics(self, action: int, reward: float, metrics: Dict[str, float]):
+    def _log_metrics(self, action: int, base_reward: float, optimized_reward: float, metrics: Dict[str, float]):
         """Log metrics to WandB with enhanced throughput tracking."""
-        wandb_metrics = {
-            "actions/scale_up": 1 if action == 0 else 0,
-            "actions/scale_down": 1 if action == 1 else 0,
-            "actions/no_change": 1 if action == 2 else 0,
-            "rewards/optimized": reward,
-            "metrics/latency": metrics['latency'],
-            "metrics/throughput": metrics['throughput'],
-            "metrics/cost": metrics['cost'],
-            "metrics/queue_length": metrics['queue_length'],
-            "train/global_step": self.total_steps
-        }
+        if wandb.run is None:
+            return  # Skip logging if wandb not initialized
 
-        # Add enhanced throughput metrics if available
-        if 'requests_per_second' in metrics:
-            wandb_metrics.update({
-                "throughput/requests_per_second": metrics['requests_per_second'],
-                "throughput/peak_rps": metrics['peak_rps'],
-                "throughput/success_rate": metrics['success_rate'],
-                "throughput/bandwidth_mbps": metrics['bandwidth_mbps'],
-                "performance/response_time_p95": metrics.get('response_time_p95', 0),
-                "performance/response_time_p99": metrics.get('response_time_p99', 0)
-            })
+        try:
+            wandb_metrics = {
+                "actions/scale_up": 1 if action == 0 else 0,
+                "actions/scale_down": 1 if action == 1 else 0,
+                "actions/no_change": 1 if action == 2 else 0,
+                "rewards/base": base_reward,  # Stable reward used for DQN
+                "rewards/optimized": optimized_reward,  # PPO-modified reward for analysis
+                "rewards/ppo_delta": optimized_reward - base_reward,  # PPO contribution
+                "metrics/latency": metrics['latency'],
+                "metrics/throughput": metrics['throughput'],
+                "metrics/cost": metrics['cost'],
+                "metrics/queue_length": metrics['queue_length'],
+                "train/global_step": self.total_steps
+            }
 
-        wandb.log(wandb_metrics)
+            # Add enhanced throughput metrics if available
+            if 'requests_per_second' in metrics:
+                wandb_metrics.update({
+                    "throughput/requests_per_second": metrics['requests_per_second'],
+                    "throughput/peak_rps": metrics['peak_rps'],
+                    "throughput/success_rate": metrics['success_rate'],
+                    "throughput/bandwidth_mbps": metrics['bandwidth_mbps'],
+                    "performance/response_time_p95": metrics.get('response_time_p95', 0),
+                    "performance/response_time_p99": metrics.get('response_time_p99', 0)
+                })
+
+            wandb.log(wandb_metrics)
+        except Exception as e:
+            logger.warning(f"Failed to log metrics to wandb: {e}")
 
     def export_throughput_metrics(self, output_dir: str = "monitoring", test_id: str = None):
         """Export throughput metrics to CSV files for analysis."""
@@ -1002,39 +1076,51 @@ class HybridDQNPPOAgent:
     def _evaluate(self):
         """Evaluate agent performance."""
         logger.info(f"Evaluating at step {self.total_steps}")
-        
+
         # Run evaluation episodes
         eval_rewards = []
+        eval_base_rewards = []
         for _ in range(5):
             episode_reward = 0.0
+            episode_base_reward = 0.0
             state = self.get_state()
-            
+
             for _ in range(100):  # Max 100 steps per eval episode
                 action = self.dqn_agent.select_action(state, training=False)
                 result = self.execute_action(action)
                 next_state = self.get_state()
-                
+
                 base_reward = self.calculate_base_reward(state, next_state)
                 optimized_reward = self.ppo_optimizer.optimize_reward(
                     state, base_reward, result['metrics']
                 )
-                
+
                 episode_reward += optimized_reward
+                episode_base_reward += base_reward
                 state = next_state
-                
+
                 if self._is_episode_done(state):
                     break
-            
+
             eval_rewards.append(episode_reward)
+            eval_base_rewards.append(episode_base_reward)
         
         avg_reward = np.mean(eval_rewards)
-        wandb.log({
-            "eval/mean_reward": avg_reward,
-            "eval/std_reward": np.std(eval_rewards),
-            "train/global_step": self.total_steps
-        })
-        
-        logger.info(f"Evaluation: mean reward = {avg_reward:.2f}")
+        avg_base_reward = np.mean(eval_base_rewards)
+
+        if wandb.run is not None:
+            try:
+                wandb.log({
+                    "eval/mean_reward": avg_reward,
+                    "eval/mean_base_reward": avg_base_reward,  # DQN's actual learning signal
+                    "eval/std_reward": np.std(eval_rewards),
+                    "eval/std_base_reward": np.std(eval_base_rewards),
+                    "train/global_step": self.total_steps
+                })
+            except Exception as e:
+                logger.warning(f"Failed to log evaluation results to wandb: {e}")
+
+        logger.info(f"Evaluation: mean reward = {avg_reward:.2f}, mean base reward = {avg_base_reward:.2f}")
     
     def save_models(self, path: str = "./models/hybrid"):
         """Save both DQN and PPO models."""
