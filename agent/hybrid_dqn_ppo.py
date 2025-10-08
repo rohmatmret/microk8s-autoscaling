@@ -43,8 +43,8 @@ class HybridConfig:
     dqn_gamma: float = 0.9732108019691487
     dqn_tau: float = 0.0380978024125337
     dqn_epsilon_start: float = 1.0
-    dqn_epsilon_end: float = 0.1448672884499737
-    dqn_epsilon_decay: float = 0.999  # Slower decay for sustained exploration
+    dqn_epsilon_end: float = 0.05  # Reduced from 0.1448 for less random exploration
+    dqn_epsilon_decay: float = 0.995  # Faster decay from 0.999 for quicker convergence
     dqn_target_update_freq: int = 1049
     
     # PPO Configuration - Using optimized parameters
@@ -154,14 +154,15 @@ class DQNAgent:
         """Select action using enhanced epsilon-greedy policy with adaptive exploration."""
         # Enhanced exploration for dynamic behavior
         if training and random.random() < self.epsilon:
-            # Adaptive exploration based on CPU utilization
+            # Adaptive exploration based on CPU utilization and latency
             if len(state) >= 4:
                 cpu_util = state[0]
-                # Bias exploration towards scaling actions when CPU is extreme
-                if cpu_util > 0.8:  # High CPU -> bias towards scale-up
-                    return random.choices([0, 1, 2], weights=[0.6, 0.2, 0.2])[0]
-                elif cpu_util < 0.4:  # Low CPU -> bias towards scale-down
-                    return random.choices([0, 1, 2], weights=[0.2, 0.6, 0.2])[0]
+                latency = state[2] if len(state) > 2 else 0.0
+                # Bias exploration towards scaling actions when metrics indicate need
+                if cpu_util > 0.8 or latency > 0.18:  # High CPU or approaching SLA violation
+                    return random.choices([0, 1, 2], weights=[0.8, 0.1, 0.1])[0]  # 80% scale-up
+                elif cpu_util < 0.4 and latency < 0.15:  # Low CPU and good latency
+                    return random.choices([0, 1, 2], weights=[0.1, 0.7, 0.2])[0]  # 70% scale-down
             return random.randint(0, self.config.action_dim - 1)
 
         with torch.no_grad():
@@ -455,6 +456,11 @@ class HybridDQNPPOAgent:
         # Mock mode pod tracking - FIX: Properly track current pods
         self.mock_current_pods = 1  # Track actual pod count in mock mode
 
+        # Complex traffic simulation support
+        self.use_complex_traffic = False
+        self.current_scenario = None
+        self.scenario_step = 0
+
         # Metrics tracking
         self.metrics_callback = AutoscalingMetricsCallback()
 
@@ -513,10 +519,15 @@ class HybridDQNPPOAgent:
             # Calculate realistic state based on load and pod count
             current_pods = self.mock_current_pods
 
-            # Simulate load (varies over time)
-            import time
-            time_factor = (time.time() % 3600) / 3600.0  # 0-1 over an hour
-            base_load = 500 + 300 * np.sin(time_factor * 2 * np.pi)  # Oscillating load
+            # Determine load source
+            if self.use_complex_traffic and self.current_scenario:
+                # Use complex traffic pattern
+                base_load = self._generate_complex_traffic(self.current_scenario, self.scenario_step)
+            else:
+                # Use simple oscillating load (original behavior)
+                import time
+                time_factor = (time.time() % 3600) / 3600.0  # 0-1 over an hour
+                base_load = 500 + 300 * np.sin(time_factor * 2 * np.pi)  # Oscillating load
 
             # Calculate metrics based on pod count and load
             pod_capacity = 200  # RPS per pod
@@ -719,7 +730,14 @@ class HybridDQNPPOAgent:
             }
     
     def calculate_base_reward(self, prev_state: np.ndarray, current_state: np.ndarray) -> float:
-        """Calculate base reward from state transition with aggressive latency focus."""
+        """
+        Calculate base reward with balanced SLA and efficiency focus.
+
+        Key objectives (equal priority):
+        1. Meet SLA targets (latency < 150ms)
+        2. Optimize CPU utilization (target 60-70%)
+        3. Minimize cost (avoid over-provisioning)
+        """
         # Ensure we have the right number of state dimensions
         if len(current_state) >= 4:
             cpu, memory, latency, pods = current_state[:4]
@@ -734,68 +752,92 @@ class HybridDQNPPOAgent:
 
         reward = 0.0
 
-        # 1. Balanced SLA rewards/penalties (not too extreme)
-        if latency < 0.15:  # Excellent SLA - meeting target
-            reward += 8.0  # Strong positive reinforcement
-        elif latency < 0.2:  # Good SLA
-            reward += 3.0  # Moderate reward
-        elif latency < 0.3:  # Acceptable
-            reward += 0.0  # Neutral
-        else:  # SLA violation (>0.3s is clearly bad)
-            # Exponential penalty based on severity
-            violation_magnitude = (latency - 0.3) / 0.3
-            reward -= 10.0 * (1 + violation_magnitude)
+        # 1. SLA Performance (PRIMARY OBJECTIVE - maintain quality)
+        # SLA threshold: 200ms (0.2s) per research report
+        SLA_THRESHOLD = 0.2
 
-        # 2. Resource Efficiency Rewards (target 40-70% CPU - aligned with HPA thresholds)
-        if 0.4 <= cpu <= 0.7:  # Optimal range - matches rule-based agent targets
-            reward += 1.5
-        elif 0.3 <= cpu < 0.4:  # Under-utilized but acceptable
-            reward += 0.5
-        elif cpu < 0.3:  # Significantly under-utilized
-            reward -= 0.5
-        elif cpu > 0.7:  # Over-utilized - encourage scaling up
-            reward -= 1.0
+        if latency < 0.10:  # Excellent (50% below SLA)
+            reward += 20.0  # Very strong reward for excellent performance
+        elif latency < 0.15:  # Good (25% below SLA)
+            reward += 15.0  # Strong positive reinforcement
+        elif latency < SLA_THRESHOLD:  # Within SLA (0.15-0.2s)
+            reward += 8.0  # Good reward for meeting SLA
+        elif latency < 0.25:  # Minor SLA violation (0.2-0.25s)
+            # Gentle penalty for minor violations (help learning)
+            violation_magnitude = (latency - SLA_THRESHOLD) / 0.05  # Normalize to 0-1
+            reward -= 10.0 * violation_magnitude  # Linear penalty: 0 to -10
+        else:  # Severe SLA violation (>0.25s)
+            # Stronger penalty for severe violations
+            violation_severity = (latency - 0.25) / 0.25
+            reward -= 15.0 + 10.0 * violation_severity  # -15 to -25
 
-        # 3. Dynamic Scaling Rewards (encourage appropriate scaling actions)
-        cpu_change = cpu - prev_cpu
-        latency_change = latency - prev_latency
+        # 2. CPU Efficiency (TERTIARY priority - much less important than SLA)
+        # Target: 60-70% CPU utilization for optimal efficiency
+        cpu_target = 0.65  # Optimal target
+        cpu_error = abs(cpu - cpu_target)
+
+        if cpu_error < 0.05:  # 60-70% range - PERFECT!
+            reward += 3.0  # Small reward - don't over-emphasize efficiency
+        elif cpu_error < 0.15:  # 50-80% range - Good enough
+            reward += 1.0  # Acceptable range
+        elif cpu < 0.30:  # Very low CPU utilization (wasteful)
+            reward -= 2.0  # Small penalty - waste is better than SLA violations
+        elif cpu > 0.85:  # Very high CPU (danger zone for SLA)
+            reward -= 12.0  # STRONG penalty - high risk of SLA violation
+
+        # 3. Cost Efficiency (discourage wasteful over-provisioning only)
+        # Allow more pods if needed for SLA compliance
+        if pods > 0.9:  # Using >90% of max pods (extreme)
+            reward -= 5.0  # Moderate penalty - we might need this for SLA
+        elif pods > 0.6 and cpu < 0.40 and latency < 0.15:  # Clear over-provisioning
+            # Only penalize if we have many pods, low CPU, AND good latency
+            waste_penalty = (pods - 0.6) * 5.0
+            reward -= waste_penalty  # Gentle penalty for waste
+
+        # 4. Optimal State Bonus (encourage SLA compliance primarily)
+        # Reward excellent SLA compliance regardless of efficiency
+        if latency < 0.15:  # Excellent latency is most important
+            if 0.50 <= cpu <= 0.75:  # Reasonable CPU range
+                reward += 10.0  # Big bonus for great SLA + reasonable efficiency
+            else:
+                reward += 5.0  # Still good reward for excellent SLA alone
+
+        # 5. Dynamic Scaling Rewards (encourage smart proactive decisions)
         pod_change = pods - prev_pods
 
-        # Reward scaling up when needed (prioritizing latency) - more latency-focused
-        if pod_change > 0 and (latency > 0.2 or cpu > 0.5):  # Latency threshold first
-            if latency > 0.25:  # High latency gets bigger reward for scaling up
+        # Reward proactive scaling up when approaching limits (before SLA violation)
+        if pod_change > 0:
+            if latency > 0.18:  # Proactive scaling before SLA violation (0.2)
+                reward += 5.0  # Strong reward for preventing violations
+            elif latency > 0.15 or cpu > 0.70:  # Early proactive scaling
+                reward += 3.0  # Good proactive behavior
+            elif cpu > 0.75:  # Scaling when CPU is high
                 reward += 2.0
-            else:
-                reward += 1.0
 
-        # Reward scaling down when appropriate (very conservative with latency)
-        elif pod_change < 0 and (cpu < 0.3 and latency < 0.15):  # Much stricter latency requirement
-            reward += 1.0
+        # Reward scaling down when safe (low CPU + good SLA)
+        elif pod_change < 0 and cpu < 0.50 and latency < 0.15:
+            reward += 3.0  # Encourage efficient scale-down
 
         # Penalize harmful scaling decisions
-        elif pod_change > 0 and cpu < 0.3 and latency < 0.15:  # Scaling up when not needed
-            reward -= 1.5
-        elif pod_change < 0 and (cpu > 0.6 or latency > 0.15):  # Risky scale-down
-            reward -= 5.0  # Strong but not extreme penalty
+        elif pod_change > 0 and cpu < 0.40 and latency < 0.15:
+            # Scaling up when not needed (wasteful)
+            reward -= 4.0  # ✅ Stronger penalty (was -1.5)
+        elif pod_change < 0 and (cpu > 0.70 or latency > 0.18):
+            # Risky scale-down
+            reward -= 6.0  # Strong penalty for dangerous decisions
 
-        # 4. Balanced cost penalty (encourage efficiency without starving resources)
-        # Reward cost efficiency ONLY when SLA is safe
-        if latency < 0.15 and cpu < 0.5:  # Safe to optimize cost
-            if pods < 0.5:  # Running lean
-                reward += 1.5  # Reward efficiency
-        # Penalize waste (high pods + low utilization + good SLA)
-        elif pods > 0.7 and cpu < 0.3 and latency < 0.15:
-            reward -= (pods - 0.5) * 1.0  # Moderate penalty for over-provisioning
+        # 6. Stability Bonus (reward steady efficient state)
+        if abs(pod_change) == 0:
+            if 0.60 <= cpu <= 0.70 and latency < 0.20:
+                reward += 1.0  # Bonus for maintaining optimal state
+            elif 0.40 <= cpu <= 0.80 and latency < 0.25:
+                reward += 0.3  # Small bonus for acceptable steady state
 
-        # 5. Stability bonus (small reward for good steady state) - aligned with HPA targets
-        if abs(pod_change) == 0 and 0.4 <= cpu <= 0.7 and latency < 0.3:
-            reward += 0.2
-
-        # 6. Penalty for extreme states
-        if pods < 0.1:  # Too few pods
-            reward -= 1.0
-        elif pods > 0.9:  # Too many pods
-            reward -= 1.0
+        # 7. Extreme State Penalties
+        if pods < 0.1:  # Too few pods - risk of failure
+            reward -= 5.0  # ✅ Stronger penalty (was -1.0)
+        elif pods > 0.95:  # At maximum capacity - very inefficient
+            reward -= 6.0  # ✅ Much stronger penalty (was -1.0)
 
         return reward
     
@@ -816,11 +858,7 @@ class HybridDQNPPOAgent:
         # Calculate base reward
         base_reward = self.calculate_base_reward(current_state, next_state)
 
-        # CRITICAL FIX: DQN learns from STABLE base reward
-        # PPO only provides auxiliary signal for analysis, not for DQN training
-        dqn_reward = base_reward  # Stable reward for Q-learning
-
-        # PPO optimizes reward for performance tracking only
+        # PPO optimizes reward for adaptive learning
         optimized_reward = self.ppo_optimizer.optimize_reward(
             current_state, base_reward, result['metrics']
         )
@@ -828,10 +866,14 @@ class HybridDQNPPOAgent:
         if isinstance(optimized_reward, tuple):
             optimized_reward = optimized_reward[0]
 
-        # Store experience in DQN replay buffer with STABLE reward
+        # HYBRID APPROACH: Blend base and optimized rewards for stability with adaptation
+        # 70% stable base reward + 30% PPO-optimized reward
+        dqn_reward = 0.7 * base_reward + 0.3 * optimized_reward
+
+        # Store experience in DQN replay buffer with blended reward
         done = self._is_episode_done(next_state)
         self.dqn_agent.replay_buffer.push(
-            current_state, action, dqn_reward, next_state, done  # Use base_reward, not optimized
+            current_state, action, dqn_reward, next_state, done  # Use blended reward
         )
 
         # Update episode tracking with optimized reward (for monitoring)
@@ -844,8 +886,8 @@ class HybridDQNPPOAgent:
             self.current_episode_reward, self.current_episode_length, result['metrics']
         )
 
-        # Log both rewards for comparison
-        self._log_metrics(action, base_reward, optimized_reward, result['metrics'])
+        # Log all rewards for comparison
+        self._log_metrics(action, base_reward, optimized_reward, dqn_reward, result['metrics'])
         
         # Check if episode is done
         if done:
@@ -874,8 +916,9 @@ class HybridDQNPPOAgent:
         return {
             'state': current_state,
             'action': action,
-            'reward': base_reward,  # Return stable reward
-            'optimized_reward': optimized_reward,  # Also track optimized
+            'reward': dqn_reward,  # Return blended reward used for training
+            'base_reward': base_reward,  # Track base reward
+            'optimized_reward': optimized_reward,  # Track optimized reward
             'next_state': next_state,
             'done': done,
             'metrics': result['metrics']
@@ -907,7 +950,7 @@ class HybridDQNPPOAgent:
 
         logger.info(f"Episode {self.episode_count} completed")
     
-    def _log_metrics(self, action: int, base_reward: float, optimized_reward: float, metrics: Dict[str, float]):
+    def _log_metrics(self, action: int, base_reward: float, optimized_reward: float, dqn_reward: float, metrics: Dict[str, float]):
         """Log metrics to WandB with enhanced throughput tracking."""
         if wandb.run is None:
             return  # Skip logging if wandb not initialized
@@ -917,9 +960,11 @@ class HybridDQNPPOAgent:
                 "actions/scale_up": 1 if action == 0 else 0,
                 "actions/scale_down": 1 if action == 1 else 0,
                 "actions/no_change": 1 if action == 2 else 0,
-                "rewards/base": base_reward,  # Stable reward used for DQN
-                "rewards/optimized": optimized_reward,  # PPO-modified reward for analysis
+                "rewards/base": base_reward,  # Base reward from calculate_base_reward
+                "rewards/optimized": optimized_reward,  # PPO-optimized reward
+                "rewards/dqn_training": dqn_reward,  # Blended reward used for DQN training
                 "rewards/ppo_delta": optimized_reward - base_reward,  # PPO contribution
+                "rewards/blend_factor": 0.3,  # Track blend ratio
                 "metrics/latency": metrics['latency'],
                 "metrics/throughput": metrics['throughput'],
                 "metrics/cost": metrics['cost'],
@@ -1040,22 +1085,84 @@ class HybridDQNPPOAgent:
 
         return throughput_file, prometheus_file
     
-    def train(self, total_steps: int = 50000):
-        """Train the hybrid agent."""
+    def _generate_complex_traffic(self, scenario: dict, step: int) -> float:
+        """Generate traffic load matching test patterns."""
+        pattern = scenario['pattern']
+        base = scenario['base_load']
+        max_load = scenario['max_load']
+        duration = scenario['duration_steps']
+
+        if pattern == 'steady':
+            return base + np.random.uniform(-10, 10)
+        elif pattern == 'gradual':
+            progress = min(step / duration, 1.0)
+            return base + (max_load - base) * progress + np.random.uniform(-20, 20)
+        elif pattern == 'spike':
+            if step < duration * 0.3:
+                return base + np.random.uniform(-10, 10)
+            elif step < duration * 0.6:
+                return max_load + np.random.uniform(-50, 50)
+            else:
+                return base + np.random.uniform(-10, 10)
+        elif pattern == 'daily':
+            hour = (step / duration) * 24
+            if 9 <= hour <= 17:
+                peak_factor = np.sin((hour - 9) / 8 * np.pi)
+                return base + (max_load - base) * peak_factor + np.random.uniform(-30, 30)
+            else:
+                return base + np.random.uniform(-10, 10)
+        return base
+
+    def train(self, total_steps: int = 50000, use_complex_traffic: bool = False):
+        """Train the hybrid agent.
+
+        Args:
+            total_steps: Number of training steps
+            use_complex_traffic: If True, cycles through complex traffic scenarios
+        """
+        self.use_complex_traffic = use_complex_traffic
+
+        # Define complex traffic scenarios
+        traffic_scenarios = [
+            {'name': 'baseline_steady', 'base_load': 100, 'max_load': 150,
+             'duration_steps': 100, 'pattern': 'steady'},
+            {'name': 'gradual_ramp', 'base_load': 100, 'max_load': 500,
+             'duration_steps': 200, 'pattern': 'gradual'},
+            {'name': 'sudden_spike', 'base_load': 100, 'max_load': 800,
+             'duration_steps': 150, 'pattern': 'spike'},
+            {'name': 'daily_pattern', 'base_load': 100, 'max_load': 600,
+             'duration_steps': 432, 'pattern': 'daily'}
+        ] if use_complex_traffic else []
+
+        scenario_idx = 0
+
         logger.info(f"Starting training for {total_steps} steps")
-        
+        if use_complex_traffic:
+            logger.info(f"Using complex traffic patterns: {[s['name'] for s in traffic_scenarios]}")
+
         try:
             while self.total_steps < total_steps:
+                # Setup scenario if using complex traffic
+                if use_complex_traffic:
+                    self.current_scenario = traffic_scenarios[scenario_idx]
+                    self.scenario_step = self.total_steps % self.current_scenario['duration_steps']
+
+                    # Cycle to next scenario when current one completes
+                    if self.scenario_step == 0 and self.total_steps > 0:
+                        scenario_idx = (scenario_idx + 1) % len(traffic_scenarios)
+                        if self.scenario_step == 0:
+                            logger.info(f"Switching to scenario: {traffic_scenarios[scenario_idx]['name']}")
+
                 step_result = self.step()
-                
+
                 # Periodic evaluation
                 if self.total_steps % 1000 == 0:
                     self._evaluate()
-                
+
                 # Periodic checkpointing
                 if self.total_steps % 5000 == 0:
                     self.save_models()
-                
+
         except KeyboardInterrupt:
             logger.info("Training interrupted by user")
         except Exception as e:

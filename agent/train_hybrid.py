@@ -397,7 +397,7 @@ def setup_environment(config: Dict[str, Any]) -> HybridMicroK8sEnv:
     logger.info("Hybrid environment setup completed")
     return env
 
-def train_hybrid_agent(config: Dict[str, Any], output_dir: str = "./models/hybrid", mock_mode: bool = False):
+def train_hybrid_agent(config: Dict[str, Any], output_dir: str = "./models/hybrid", mock_mode: bool = False, use_complex_traffic: bool = False):
     """Train the hybrid DQN-PPO agent."""
     try:
         # Create output directory
@@ -433,9 +433,11 @@ def train_hybrid_agent(config: Dict[str, Any], output_dir: str = "./models/hybri
         
         # Start training
         logger.info("Starting hybrid agent training...")
+        if use_complex_traffic:
+            logger.info("✅ Using complex traffic patterns (eliminates training-testing gap)")
         start_time = datetime.now()
-        
-        agent.train(total_steps=config['training']['total_steps'])
+
+        agent.train(total_steps=config['training']['total_steps'], use_complex_traffic=use_complex_traffic)
         
         # Save final models
         agent.save_models(output_dir)
@@ -550,6 +552,8 @@ def main():
                        help="Create default configuration file")
     parser.add_argument("--mock", action="store_true",
                        help="Run in mock mode (no Kubernetes required)")
+    parser.add_argument("--complex-traffic", action="store_true",
+                       help="Use complex traffic patterns (gradual ramps, spikes, daily patterns)")
     parser.add_argument("--optimize", action="store_true",
                        help="Run Bayesian hyperparameter optimization")
     parser.add_argument("--trials", type=int, default=20,
@@ -619,7 +623,7 @@ def main():
 
         else:
             # Train with default/config parameters
-            agent = train_hybrid_agent(config, args.output, mock_mode=args.mock)
+            agent = train_hybrid_agent(config, args.output, mock_mode=args.mock, use_complex_traffic=args.complex_traffic)
         
         # Evaluate if requested
         if args.eval:
