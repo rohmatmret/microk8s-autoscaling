@@ -735,8 +735,10 @@ class HybridDQNPPOAgent:
 
         Key objectives (equal priority):
         1. Meet SLA targets (latency < 150ms)
-        2. Optimize CPU utilization (target 60-70%)
+        2. Optimize CPU utilization (target 70% - matched to HPA)
         3. Minimize cost (avoid over-provisioning)
+
+        NOTE: CPU target set to 70% for FAIR comparison with HPA baseline.
         """
         # Ensure we have the right number of state dimensions
         if len(current_state) >= 4:
@@ -772,13 +774,13 @@ class HybridDQNPPOAgent:
             reward -= 15.0 + 10.0 * violation_severity  # -15 to -25
 
         # 2. CPU Efficiency (TERTIARY priority - much less important than SLA)
-        # Target: 60-70% CPU utilization for optimal efficiency
-        cpu_target = 0.65  # Optimal target
+        # Target: 70% CPU utilization (matching HPA for fair comparison)
+        cpu_target = 0.70  # Optimal target - MATCHED TO HPA
         cpu_error = abs(cpu - cpu_target)
 
-        if cpu_error < 0.05:  # 60-70% range - PERFECT!
+        if cpu_error < 0.05:  # 65-75% range - PERFECT!
             reward += 3.0  # Small reward - don't over-emphasize efficiency
-        elif cpu_error < 0.15:  # 50-80% range - Good enough
+        elif cpu_error < 0.15:  # 55-85% range - Good enough
             reward += 1.0  # Acceptable range
         elif cpu < 0.30:  # Very low CPU utilization (wasteful)
             reward -= 2.0  # Small penalty - waste is better than SLA violations
@@ -828,9 +830,9 @@ class HybridDQNPPOAgent:
 
         # 6. Stability Bonus (reward steady efficient state)
         if abs(pod_change) == 0:
-            if 0.60 <= cpu <= 0.70 and latency < 0.20:
-                reward += 1.0  # Bonus for maintaining optimal state
-            elif 0.40 <= cpu <= 0.80 and latency < 0.25:
+            if 0.65 <= cpu <= 0.75 and latency < 0.20:
+                reward += 1.0  # Bonus for maintaining optimal state (around 70% target)
+            elif 0.40 <= cpu <= 0.85 and latency < 0.25:
                 reward += 0.3  # Small bonus for acceptable steady state
 
         # 7. Extreme State Penalties
