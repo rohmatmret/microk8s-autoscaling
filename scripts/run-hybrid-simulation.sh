@@ -175,7 +175,7 @@ metadata:
     app: nginx-hybrid
     simulation: hybrid-dqn-ppo
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: nginx-hybrid
