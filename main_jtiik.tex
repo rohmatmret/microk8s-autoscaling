@@ -1,0 +1,301 @@
+\documentclass[10pt,twocolumn]{article}
+
+% Pengaturan halaman sesuai template JTIIK
+\usepackage[a4paper,left=3cm,top=3cm,right=2cm,bottom=2cm,columnsep=1cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[bahasa]{babel}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{url}
+\usepackage{hyperref}
+
+% Pengaturan caption
+\captionsetup{font=small,labelfont=bf}
+
+% Pengaturan spacing
+\setlength{\parindent}{0.5cm}
+\setlength{\parskip}{0pt}
+
+% Header dan footer
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Jurnal Teknologi Informasi dan Ilmu Komputer (JTIIK)}, Vol. x, No. x, xxxx 2025, hlm. x-y}
+\fancyhead[R]{\small p-ISSN: 2355-7699\\e-ISSN: 2528-6579}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+
+% Untuk halaman pertama
+\fancypagestyle{firstpage}{
+  \fancyhf{}
+  \fancyhead[L]{\small\textbf{Jurnal Teknologi Informasi dan Ilmu Komputer (JTIIK)} DOI: 10.25126/jtiik...\\
+  Vol. x, No. x, xxxx 2025, hlm. x-x \hfill p-ISSN: 2355-7699\\
+  Akreditasi KEMENRISTEKDIKTI, No. 36/E/KPT/2019 \hfill e-ISSN: 2528-6579}
+  \fancyfoot[C]{\thepage}
+  \renewcommand{\headrulewidth}{0pt}
+}
+
+\begin{document}
+\thispagestyle{firstpage}
+
+% Judul
+\begin{center}
+\fontsize{12}{14}\selectfont
+\textbf{AUTOSCALING PROAKTIF BERBASIS SLA MELALUI HYBRID DQN-PPO REINFORCEMENT LEARNING: SEBUAH STUDI SIMULASI}
+
+\vspace{10pt}
+
+\fontsize{10}{12}\selectfont
+\textbf{Rohmat\textsuperscript{*1}, Penulis Kedua\textsuperscript{2}}
+
+\vspace{10pt}
+
+\fontsize{10}{12}\selectfont
+\textsuperscript{1}Jurusan Teknik Informatika, Universitas XYZ\\
+\textsuperscript{2}Jurusan Ilmu Komputer, Universitas XYZ\\
+Email: \textsuperscript{1}rohmat@example.com, \textsuperscript{2}rohmat771@gmail.com\\
+*Penulis Korespondensi
+
+\vspace{10pt}
+
+(Naskah masuk: dd mmm yyyy, diterima untuk diterbitkan: dd mmm yyyy)
+
+\vspace{10pt}
+
+\textbf{Abstrak}
+
+\end{center}
+
+\fontsize{10}{12}\selectfont
+Autoscaling pada lingkungan berbasis kontainer seperti Kubernetes sangat penting untuk menyeimbangkan kualitas layanan dan efisiensi biaya. Pendekatan tradisional seperti Horizontal Pod Autoscaler (HPA) mengandalkan mekanisme reaktif berbasis ambang batas yang sering gagal mengantisipasi fluktuasi beban kerja dinamis. Makalah ini menyajikan agen hybrid Deep Q-Network (DQN) dan Proximal Policy Optimization (PPO) untuk autoscaling proaktif dengan batasan Service Level Agreement (SLA). Model yang diusulkan menggunakan optimasi multi-objektif yang mempertimbangkan utilisasi CPU, waktu respons, dan efisiensi biaya. Eksperimen dilakukan pada lingkungan simulasi Kubernetes di 5 skenario lalu lintas yang beragam (stabil, kenaikan bertahap, lonjakan mendadak, pola harian, dan periode idle) dengan total 2.202 langkah simulasi. Dengan menggunakan target CPU 70\% yang sama dengan HPA (memastikan perbandingan yang adil), agen hybrid mencapai pengurangan 7,0\% dalam pelanggaran SLA (1.067.836 vs 1.148.450), peningkatan 2,4\% dalam waktu respons rata-rata (122ms vs 125ms), dan pengurangan 4,5\% dalam biaya operasional (\$2.985.612 vs \$3.126.114). Hasil ini menunjukkan bahwa \textit{reinforcement learning} dapat secara efektif menyeimbangkan kinerja dan efisiensi untuk autoscaling berbasis SLA melalui pengambilan keputusan proaktif dan sadar pola. Penelitian selanjutnya akan memperluas simulasi ini menuju validasi cluster Kubernetes nyata.
+
+\vspace{10pt}
+
+\noindent\textbf{Kata kunci}: \textit{autoscaling, reinforcement learning, hybrid DQN-PPO, optimasi berbasis SLA, studi simulasi}
+
+\vspace{20pt}
+
+\begin{center}
+\fontsize{12}{14}\selectfont
+\textbf{\textit{PROACTIVE SLA-AWARE AUTOSCALING VIA HYBRID DQN-PPO REINFORCEMENT LEARNING: A SIMULATION STUDY}}
+
+\vspace{10pt}
+
+\fontsize{10}{12}\selectfont
+\textbf{\textit{Abstract}}
+\end{center}
+
+\fontsize{10}{12}\selectfont
+\textit{Autoscaling in containerized environments such as Kubernetes is critical for balancing service quality and cost efficiency. Traditional approaches like the Horizontal Pod Autoscaler (HPA) rely on reactive, threshold-based mechanisms that often fail to anticipate dynamic workload fluctuations. This paper presents a hybrid Deep Q-Network (DQN) and Proximal Policy Optimization (PPO) agent for proactive autoscaling under Service Level Agreement (SLA) constraints. The proposed model employs multi-objective optimization that considers CPU utilization, response time, and cost efficiency. Experiments were conducted in a simulated Kubernetes environment across 5 diverse traffic scenarios (steady, gradual ramp, sudden spike, daily pattern, and idle periods) totaling 2,202 simulation steps. Using the same 70\% CPU target as HPA (ensuring fair comparison), the hybrid agent achieved a 7.0\% reduction in SLA violations (1,067,836 vs 1,148,450), a 2.4\% improvement in average response time (122ms vs 125ms), and 4.5\% lower operational costs (\$2,985,612 vs \$3,126,114). These results demonstrate that reinforcement learning can effectively balance performance and efficiency for SLA-aware autoscaling through proactive, pattern-aware decision making. Future work will extend this simulation toward real Kubernetes cluster validation.}
+
+\vspace{10pt}
+
+\noindent\textbf{\textit{Keywords}}: \textit{autoscaling, reinforcement learning, hybrid DQN-PPO, SLA-aware optimization, simulation study}
+
+\vspace{10pt}
+
+\section{PENDAHULUAN}
+
+Aplikasi cloud-native yang digelar melalui sistem orkestrasi kontainer seperti Kubernetes harus secara dinamis menyesuaikan sumber daya mereka untuk mempertahankan jaminan kinerja di bawah beban kerja yang bervariasi. Mekanisme autoscaling tradisional, termasuk Horizontal Pod Autoscaler (HPA) (Kubernetes, 2023), mengandalkan ambang batas utilisasi CPU tetap, yang dapat menyebabkan over-provisioning atau pelanggaran SLA selama lonjakan lalu lintas mendadak.
+
+Kemajuan terbaru dalam \textit{reinforcement learning} (RL) menawarkan jalur yang menjanjikan menuju strategi autoscaling adaptif yang mempelajari kebijakan scaling langsung dari umpan balik sistem (Mao et al., 2016; Xu \& Buyya, 2021). Namun, sebagian besar pendekatan berbasis RL mengoptimalkan satu objektif tunggal (misalnya, efisiensi CPU), mengabaikan trade-off SLA dan biaya. Untuk mengatasi hal ini, kami mengusulkan pendekatan hybrid Deep Q-Network (DQN) (Mnih et al., 2015) dan Proximal Policy Optimization (PPO) (Schulman et al., 2017) yang dirancang untuk secara proaktif menyeimbangkan berbagai objektif.
+
+Kontribusi makalah ini adalah sebagai berikut:
+\begin{itemize}
+    \item Framework hybrid DQN-PPO untuk autoscaling berbasis SLA dengan batasan multi-objektif.
+    \item Strategi \textit{reward shaping} yang menyeimbangkan efisiensi CPU, latensi, biaya, dan kepatuhan SLA dengan optimasi terkendali (Achiam et al., 2017).
+    \item Evaluasi komprehensif berbasis simulasi di 5 skenario lalu lintas yang beragam membandingkan hybrid RL dengan Kubernetes HPA.
+\end{itemize}
+
+\section{TINJAUAN PUSTAKA}
+
+\subsection{Autoscaling Tradisional}
+
+Kubernetes HPA (Kubernetes, 2023) merupakan standar industri untuk autoscaling kontainer, menggunakan kebijakan reaktif berbasis ambang batas (misalnya, scale ketika CPU $>$ 70\%). Meskipun sederhana dan andal, pendekatan ini gagal mengantisipasi perubahan beban kerja, mengakibatkan over-provisioning selama penundaan scale-up dan pelanggaran SLA selama lonjakan mendadak. Google Autopilot (Rzadca et al., 2020) memperluas autoscaling tradisional dengan model prediktif tetapi tetap bersifat reaktif secara fundamental.
+
+\subsection{Reinforcement Learning untuk Manajemen Sumber Daya}
+
+Deep reinforcement learning telah menunjukkan potensi untuk manajemen sumber daya. Mao et al. (2016) memelopori alokasi sumber daya berbasis DQN, menunjukkan kinerja yang superior dibandingkan pendekatan heuristik. Xu \& Buyya (2021) menerapkan RL pada autoscaling microservices, mencapai penghematan biaya melalui kebijakan adaptif. Zhang et al. (2021) menyediakan survei komprehensif deep RL untuk alokasi sumber daya cloud.
+
+\subsection{Pendekatan Terkendali dan Hybrid}
+
+Metode RL terkendali mengatasi persyaratan keamanan dalam sistem produksi. Achiam et al. (2017) mengusulkan Constrained Policy Optimization (CPO) untuk memastikan kebijakan memenuhi batasan keras. Tesauro et al. (2006) mengeksplorasi arsitektur RL hybrid untuk komputasi otonomik. Namun, sedikit studi yang menggabungkan pembelajaran off-policy (DQN) dan on-policy (PPO) untuk autoscaling berbasis SLA di lingkungan Kubernetes.
+
+\section{METODOLOGI}
+
+\subsection{Gambaran Sistem}
+
+Sistem yang diusulkan memodelkan autoscaling sebagai Constrained Markov Decision Process (CMDP). Ruang state mencakup utilisasi CPU, latensi, dan jumlah pod aktif. Ruang aksi mendefinisikan scale up, scale down, atau mempertahankan replika. Fungsi reward menggabungkan metrik kinerja dengan penalti batasan.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\columnwidth]{performance_comparison_20251011_203819.png}
+\caption{Perbandingan Kinerja Komprehensif antara Hybrid DQN-PPO dan Kubernetes HPA}
+\label{fig:performance_comparison}
+\end{figure}
+
+\subsection{Constrained PPO dengan Optimasi Lagrangian}
+
+Mengikuti framework Constrained MDP (Achiam et al., 2017), masalah optimasi dirumuskan sebagai persamaan (1):
+
+\begin{equation}
+\max_\theta \; \mathbb{E}[R(s,a)] \quad \text{s.t.} \quad \mathbb{E}[C(s,a)] \leq \delta
+\end{equation}
+
+di mana $R(s,a)$ merepresentasikan reward (kinerja), $C(s,a)$ merepresentasikan biaya batasan (pelanggaran SLA), dan $\delta$ adalah biaya maksimum yang diizinkan. Bentuk Lagrangian ditunjukkan pada persamaan (2):
+
+\begin{equation}
+L(\theta, \lambda) = \mathbb{E}[R(s,a)] - \lambda (\mathbb{E}[C(s,a)] - \delta)
+\end{equation}
+
+Pada persamaan (2), pengali Lagrange $\lambda$ diperbarui secara dinamis menggunakan dual gradient ascent untuk menghukum pelanggaran SLA melebihi ambang batas $\delta$, memastikan kepuasan batasan selama optimasi kebijakan.
+
+\subsection{Fungsi Reward}
+
+Untuk memastikan perbandingan yang adil, agen hybrid DQN-PPO menggunakan target CPU 70\% (sesuai dengan ambang batas default HPA), dengan rentang yang dapat diterima 65-75\% (sempurna) dan 55-85\% (baik). Reward shaping:
+\begin{itemize}
+    \item +3,0 untuk CPU di [65\%,75\%] (optimal sekitar target 70\%)
+    \item +1,0 untuk CPU di [55\%,85\%] (rentang yang dapat diterima)
+    \item -2,0 untuk CPU $<$ 30\% (pemborosan under-utilization)
+    \item -12,0 untuk CPU $>$ 85\% (risiko pelanggaran SLA)
+\end{itemize}
+
+Ini memastikan bahwa perbedaan kinerja disebabkan oleh pembelajaran proaktif dan optimasi multi-objektif, bukan hanya ambang batas CPU yang lebih rendah.
+
+\section{PENGATURAN EKSPERIMEN}
+
+Eksperimen dilakukan dalam lingkungan mock berbasis Python yang mensimulasikan perilaku scaling pod Kubernetes dengan pola lalu lintas realistis. Lima skenario uji yang beragam dirancang untuk mengevaluasi kinerja autoscaling seperti ditunjukkan pada Tabel 1.
+
+\begin{table}[H]
+\centering
+\caption{Karakteristik Skenario Uji}
+\label{tab:scenarios}
+\fontsize{8}{10}\selectfont
+\begin{tabular}{lccc}
+\toprule
+\textbf{Skenario} & \textbf{Beban Dasar} & \textbf{Beban Maks} & \textbf{Durasi} \\
+\midrule
+Baseline Stabil & 2.500 RPS & 4.000 RPS & 34 langkah \\
+Kenaikan Bertahap & 1.000 RPS & 5.000 RPS & 501 langkah \\
+Lonjakan Mendadak & 2.000 RPS & 10.000 RPS & 401 langkah \\
+Pola Harian & 500 RPS & 2.000 RPS & 865 langkah \\
+Periode Idle & 50 RPS & 3.000 RPS & 401 langkah \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Simulasi lalu lintas mencakup variasi harian (sinusoidal), lonjakan acak (probabilitas 0,5-2\%), dan noise Gaussian ($\pm$5\%) untuk realisme. Metrik yang dicatat meliputi waktu respons, utilisasi CPU, pelanggaran SLA (latensi $>$ 200ms), dan biaya operasional (\$0,10 per pod per langkah).
+
+\section{HASIL DAN PEMBAHASAN}
+
+\subsection{Perbandingan Kinerja}
+
+Tabel 2 menyajikan perbandingan kinerja komprehensif antara Hybrid DQN-PPO dan Kubernetes HPA di 2.202 langkah simulasi.
+
+\begin{table}[H]
+\centering
+\caption{Perbandingan Kinerja Agen Autoscaling}
+\label{tab:comparison}
+\fontsize{8}{10}\selectfont
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Agen} & \textbf{CPU} & \textbf{Resp.} & \textbf{Peln.} & \textbf{Biaya} \\
+ & \textbf{(\%)} & \textbf{(ms)} & \textbf{SLA} & \textbf{(\$)} \\
+\midrule
+K8s HPA (70\%) & 52,1 & 125 & 1.148.450 & 3.126.114 \\
+Hybrid DQN-PPO & 52,6 & 122 & 1.067.836 & 2.985.612 \\
+\midrule
+\textbf{Peningkatan} & +0,5\% & \textbf{-2,4\%} & \textbf{-7,0\%} & \textbf{-4,5\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Agen hybrid menunjukkan peningkatan terukur di semua metrik kunci meskipun menggunakan target CPU 70\% yang sama dengan HPA. Secara khusus, ia mencapai waktu respons 2,4\% lebih cepat (122ms vs 125ms), 7,0\% lebih sedikit pelanggaran SLA (1.067.836 vs 1.148.450), dan 4,5\% biaya operasional lebih rendah (\$2.985.612 vs \$3.126.114).
+
+\subsection{Analisis Perilaku Scaling}
+
+Analisis keputusan scaling mengungkapkan perbedaan fundamental dalam perilaku agen seperti ditunjukkan pada Tabel 3.
+
+\begin{table}[H]
+\centering
+\caption{Distribusi Perilaku Scaling}
+\label{tab:scaling}
+\fontsize{8}{10}\selectfont
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Agen} & \textbf{Scale} & \textbf{Scale} & \textbf{Tidak} & \textbf{Frek.} \\
+ & \textbf{Up} & \textbf{Down} & \textbf{Berubah} & \\
+\midrule
+HPA & 1,6\% & 1,5\% & 96,9\% & 121/jam \\
+Hybrid & 29,6\% & 21,4\% & 49,0\% & 1.745/jam \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+HPA menunjukkan perilaku scaling konservatif (96,9\% keputusan tidak berubah), melakukan penyesuaian hanya ketika ambang batas dilanggar. Sebaliknya, agen hybrid menunjukkan perilaku adaptif dengan penyesuaian sadar pola (51\% keputusan aktif), memungkinkan scaling proaktif sebelum degradasi kinerja terjadi.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\columnwidth]{performance_radar_20251011_203819.png}
+\caption{Diagram Radar Perbandingan Multi-Dimensi Hybrid DQN-PPO dan HPA}
+\label{fig:radar}
+\end{figure}
+
+Gambar 2 menunjukkan perbandingan multi-dimensi antara kedua agen dalam bentuk diagram radar. Agen hybrid menunjukkan keseimbangan yang lebih baik di semua metrik kinerja.
+
+\subsection{Validasi Perbandingan yang Adil}
+
+Untuk memastikan perbandingan yang adil, kedua agen menggunakan target CPU 70\% yang identik. Perbedaan kinerja muncul dari:
+\begin{itemize}
+    \item \textbf{Proaktif vs Reaktif}: RL mengantisipasi perubahan beban melalui pembelajaran pola
+    \item \textbf{Optimasi Multi-Objektif}: Optimasi simultan waktu respons, SLA, dan biaya
+    \item \textbf{Perilaku Adaptif}: Pembelajaran berkelanjutan dari pola lalu lintas vs ambang batas statis
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\columnwidth]{reward_optimization_comparison.png}
+\caption{Perbandingan Optimasi Reward Hybrid DQN-PPO}
+\label{fig:reward_optimization}
+\end{figure}
+
+Gambar 3 menunjukkan konvergensi pembelajaran hybrid DQN-PPO. Kurva menunjukkan peningkatan reward kumulatif seiring waktu pelatihan, mengindikasikan bahwa agen berhasil mempelajari kebijakan yang optimal.
+
+\subsection{Wawasan Kunci}
+
+Frekuensi scaling 14,4$\times$ lebih tinggi (1.745 vs 121 aksi/jam) menunjukkan bahwa agen hybrid membuat penyesuaian halus dan sadar pola daripada menunggu pelanggaran ambang batas. Perilaku proaktif ini menjelaskan kinerja superior meskipun target CPU identik.
+
+\section{KESIMPULAN}
+
+Studi ini memvalidasi efektivitas hybrid DQN-PPO reinforcement learning untuk autoscaling berbasis SLA di lingkungan Kubernetes. Dievaluasi di 5 skenario lalu lintas beragam dengan total 2.202 langkah simulasi, pendekatan ini menunjukkan peningkatan konsisten: waktu respons 2,4\% lebih cepat, 7,0\% lebih sedikit pelanggaran SLA, dan 4,5\% biaya lebih rendah dibandingkan Kubernetes HPA—meskipun menggunakan target CPU 70\% yang identik untuk perbandingan yang adil. Hasil ini mengonfirmasi bahwa peningkatan kinerja muncul dari pengambilan keputusan proaktif dan sadar pola daripada penyetelan ambang batas manual. Penelitian masa depan akan memperluas validasi ke cluster Kubernetes produksi dengan beban kerja nyata dan menyelidiki transfer learning di berbagai lingkungan deployment.
+
+\section*{UCAPAN TERIMA KASIH}
+
+Penulis berterima kasih kepada pusat penelitian Universitas XYZ atas dukungan terhadap pekerjaan ini.
+
+\section*{DAFTAR PUSTAKA}
+
+ACHIAM, J., HELD, D., TAMAR, A. \& ABBEEL, P., 2017. Constrained Policy Optimization. \textit{Proceedings of the 34th International Conference on Machine Learning}, PMLR 70, pp.22-31.
+
+KUBERNETES, 2023. Horizontal Pod Autoscaler. [online] Tersedia di: <https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/> [Diakses 15 Oktober 2024].
+
+MAO, H., ALIZADEH, M., MENACHE, I. \& KANDULA, S., 2016. Resource Management with Deep Reinforcement Learning. \textit{Proceedings of the 15th ACM Workshop on Hot Topics in Networks}, pp.50-56.
+
+MNIH, V., KAVUKCUOGLU, K., SILVER, D., RUSU, A.A., VENESS, J., BELLEMARE, M.G., GRAVES, A., RIEDMILLER, M., FIDJELAND, A.K., OSTROVSKI, G., PETERSEN, S., BEATTIE, C., SADIK, A., ANTONOGLOU, I., KING, H., KUMARAN, D., WIERSTRA, D., LEGG, S. \& HASSABIS, D., 2015. Human-level Control through Deep Reinforcement Learning. \textit{Nature}, 518(7540), pp.529-533.
+
+RZADCA, K., FINDEISEN, P., SWIDERSKI, J., ZYCH, P., BRONIEK, P., KUSMIEREK, J., NOWAK, P., STRACK, B., WITHERS, P., HAND, S. \& WILKES, J., 2020. Autopilot: Workload Autoscaling at Google. \textit{Proceedings of the Fifteenth European Conference on Computer Systems}, Article No. 16, pp.1-16.
+
+SCHULMAN, J., WOLSKI, F., DHARIWAL, P., RADFORD, A. \& KLIMOV, O., 2017. Proximal Policy Optimization Algorithms. \textit{arXiv preprint arXiv:1707.06347}.
+
+TESAURO, G., JONG, N.K., DAS, R. \& BENNANI, M.N., 2006. A Hybrid Reinforcement Learning Approach to Autonomic Resource Allocation. \textit{Proceedings of the 2006 IEEE International Conference on Autonomic Computing}, pp.65-73.
+
+XU, M. \& BUYYA, R., 2021. Adaptive Task Scheduling for Multi-Tier Web Applications in Cloud Environment. \textit{Future Generation Computer Systems}, 117, pp.132-145.
+
+ZHANG, L., WANG, Y., ZHANG, W., CHANG, C.K. \& MA, T., 2021. A Survey on Deep Reinforcement Learning for Cloud Resource Management. \textit{IEEE Access}, 9, pp.119994-120014.
+
+\end{document}

@@ -1,0 +1,200 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{amsmath,amsfonts}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{float}
+
+\begin{document}
+
+\title{Proactive SLA-Aware Autoscaling via Hybrid DQN–PPO Reinforcement Learning: A Simulation Study}
+
+\author{
+\IEEEauthorblockN{Rohmat}
+\IEEEauthorblockA{
+Master Program in Systems and Technology Innovation\\
+School of Interdisciplinary Management and Technology\\
+Institut Teknologi Sepuluh Nopember\\
+Surabaya, Indonesia\\
+Email: rohmat771@gmail.com}
+\and
+\IEEEauthorblockN{Mauridhi Hery Purnomo}
+\IEEEauthorblockA{
+Department of Electrical Engineering\\
+Institut Teknologi Sepuluh Nopember\\
+Surabaya, Indonesia\\
+Email: hery@ee.its.ac.id}
+\and
+\IEEEauthorblockN{Feby Artwodini Muqtadiroh}
+\IEEEauthorblockA{
+Department of Information Systems\\
+Institut Teknologi Sepuluh Nopember\\
+Surabaya, Indonesia\\
+Email: feby@is.its.ac.id}
+}
+
+\maketitle
+
+\begin{abstract}
+Autoscaling in containerized environments such as Kubernetes is critical for balancing service quality and cost efficiency. Traditional approaches like the Horizontal Pod Autoscaler (HPA) rely on reactive, threshold-based mechanisms that often fail to anticipate dynamic workload fluctuations. This paper presents a hybrid Deep Q-Network (DQN) and Proximal Policy Optimization (PPO) agent for proactive autoscaling under Service Level Agreement (SLA) constraints. The proposed model employs multi-objective optimization that considers CPU utilization, response time, and cost efficiency. Experiments were conducted in a simulated Kubernetes environment across 5 diverse traffic scenarios (steady, gradual ramp, sudden spike, daily pattern, and idle periods) totaling 2,202 simulation steps. Using the same 70\% CPU target as HPA (ensuring fair comparison), the hybrid agent achieved a 7.0\% reduction in SLA violations (1,067,836 vs 1,148,450), a 2.4\% improvement in average response time (122ms vs 125ms), and 4.5\% lower operational costs (\$2,985,612 vs \$3,126,114). These results demonstrate that reinforcement learning can effectively balance performance and efficiency for SLA-aware autoscaling through proactive, pattern-aware decision making. Future work will extend this simulation toward real Kubernetes cluster validation.
+\end{abstract}
+
+\begin{IEEEkeywords}
+autoscaling, reinforcement learning, hybrid DQN–PPO, SLA-aware optimization, simulation study
+\end{IEEEkeywords}
+
+\section{Introduction}
+Cloud-native applications deployed via container orchestration systems such as Kubernetes must dynamically adjust their resources to maintain performance guarantees under variable workloads. Traditional autoscaling mechanisms, including the Horizontal Pod Autoscaler (HPA) \cite{kubernetes2023hpa}, rely on fixed CPU utilization thresholds, which may lead to over-provisioning or SLA violations during sudden traffic surges.
+
+Recent advances in reinforcement learning (RL) offer a promising path toward adaptive autoscaling strategies that learn scaling policies directly from system feedback \cite{mao2016resource, xu2021adaptive}. However, most RL-based approaches optimize for a single objective (e.g., CPU efficiency), neglecting the SLA and cost trade-offs. To address this, we propose a hybrid Deep Q-Network (DQN) \cite{mnih2015human} and Proximal Policy Optimization (PPO) \cite{schulman2017proximal} approach designed to proactively balance multiple objectives.
+
+The contributions of this paper are as follows:
+\begin{itemize}
+    \item A hybrid DQN–PPO framework for SLA-aware autoscaling under multi-objective constraints.
+    \item Reward shaping strategy that balances CPU efficiency, latency, cost, and SLA compliance with constrained optimization \cite{achiam2017constrained}.
+    \item Comprehensive simulation-based evaluation across 5 diverse traffic scenarios comparing hybrid RL against Kubernetes HPA.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Traditional Autoscaling}
+Kubernetes HPA \cite{kubernetes2023hpa} represents the industry standard for container autoscaling, using reactive threshold-based policies (e.g., scale when CPU $>$ 70\%). While simple and reliable, this approach fails to anticipate workload changes, resulting in over-provisioning during scale-up delays and SLA violations during sudden spikes. Google's Autopilot \cite{rzadca2020autopilot} extends traditional autoscaling with predictive models but remains fundamentally reactive.
+
+\subsection{Reinforcement Learning for Resource Management}
+Deep reinforcement learning has shown promise for resource management. Mao et al. \cite{mao2016resource} pioneered DQN-based resource allocation, demonstrating superior performance over heuristic approaches. Xu and Buyya \cite{xu2021adaptive} applied RL to microservices autoscaling, achieving cost savings through adaptive policies. Zhang et al. \cite{zhang2021deep} provide a comprehensive survey of deep RL for cloud resource allocation. Recent advances include performance-cost optimization for Spark jobs \cite{islam2021performance} and AI-driven frameworks for hybrid cloud platforms \cite{barua2023ai}. Gari et al. \cite{gari2020reinforcement} surveyed RL-based autoscaling approaches, highlighting challenges in production deployment.
+
+\subsection{Constrained and Hybrid Approaches}
+Constrained RL methods address safety requirements in production systems. Achiam et al. \cite{achiam2017constrained} proposed Constrained Policy Optimization (CPO) to ensure policies satisfy hard constraints. Tesauro et al. \cite{tesauro2006hybrid} explored hybrid RL architectures for autonomic computing. Maurer et al. \cite{maurer2013adaptive} demonstrated adaptive resource configuration for cloud infrastructure management. Santos et al. \cite{santos2024efficient} recently applied RL to efficient microservice deployment in Kubernetes multi-clusters. However, few studies combine off-policy (DQN) \cite{mnih2015human} and on-policy (PPO) \cite{schulman2017proximal} learning for SLA-aware autoscaling in Kubernetes environments.
+
+\section{Methodology}
+\subsection{System Overview}
+The proposed system models autoscaling as a Constrained Markov Decision Process (CMDP). The state space includes CPU utilization, latency, and active pod count. The action space defines scaling up, scaling down, or maintaining replicas. The reward function combines performance metrics with constraint penalties.
+
+\subsection{Constrained PPO with Lagrangian Optimization}
+Following the Constrained MDP framework \cite{achiam2017constrained}, the optimization problem is formulated as:
+\[
+\max_\theta \; \mathbb{E}[R(s,a)] \quad \text{s.t.} \quad \mathbb{E}[C(s,a)] \leq \delta
+\]
+where $R(s,a)$ represents the reward (performance), $C(s,a)$ represents the constraint cost (SLA violations), and $\delta$ is the maximum allowable cost. The Lagrangian form is:
+\[
+L(\theta, \lambda) = \mathbb{E}[R(s,a)] - \lambda (\mathbb{E}[C(s,a)] - \delta)
+\]
+Here, the Lagrange multiplier $\lambda$ is dynamically updated using dual gradient ascent to penalize SLA violations beyond the threshold $\delta$, ensuring constraint satisfaction during policy optimization \cite{schulman2017proximal}.
+
+\subsection{Reward Function}
+To ensure fair comparison, the hybrid DQN–PPO agent uses a CPU target of 70\% (matching HPA's default threshold), with acceptable ranges of 65–75\% (perfect) and 55–85\% (good). Reward shaping:
+\begin{itemize}
+    \item +3.0 for CPU in [65\%,75\%] (optimal around 70\% target)
+    \item +1.0 for CPU in [55\%,85\%] (acceptable range)
+    \item -2.0 for CPU $<$ 30\% (wasteful under-utilization)
+    \item -12.0 for CPU $>$ 85\% (SLA violation risk)
+\end{itemize}
+This ensures that performance differences are due to proactive learning and multi-objective optimization, not simply a lower CPU threshold.
+
+\section{Experimental Setup}
+Experiments were performed in a Python-based mock environment simulating Kubernetes pod scaling behavior with realistic traffic patterns. This simulation-based approach follows established practices in cloud resource management research \cite{manvi2014resource} and allows for controlled evaluation of autoscaling policies \cite{bu2019deep}. Five diverse test scenarios were designed to evaluate autoscaling performance:
+
+\begin{table}[H]
+\caption{Test Scenario Characteristics}
+\label{tab:scenarios}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Scenario & Base Load & Max Load & Duration \\
+\midrule
+Baseline Steady & 2,500 RPS & 4,000 RPS & 34 steps \\
+Gradual Ramp & 1,000 RPS & 5,000 RPS & 501 steps \\
+Sudden Spike & 2,000 RPS & 10,000 RPS & 401 steps \\
+Daily Pattern & 500 RPS & 2,000 RPS & 865 steps \\
+Idle Periods & 50 RPS & 3,000 RPS & 401 steps \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Traffic simulation includes daily variation (sinusoidal), random spikes (0.5-2\% probability), and Gaussian noise ($\pm$5\%) for realism. Metrics recorded include response time, CPU utilization, SLA violations (latency $>$ 200ms), and operational cost (\$0.10 per pod per step).
+
+\section{Results and Discussion}
+
+\subsection{Performance Comparison}
+Table~\ref{tab:comparison} presents the comprehensive performance comparison between Hybrid DQN–PPO and Kubernetes HPA across 2,202 simulation steps.
+
+\begin{table}[H]
+\caption{Performance Comparison of Autoscaling Agents}
+\label{tab:comparison}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Agent & CPU (\%) & Resp. (ms) & SLA Viol. & Cost (\$) \\
+\midrule
+K8s HPA (70\%) & 52.1 & 125 & 1,148,450 & 3,126,114 \\
+Hybrid DQN–PPO & 52.6 & 122 & 1,067,836 & 2,985,612 \\
+\midrule
+\textbf{Improvement} & +0.5\% & \textbf{-2.4\%} & \textbf{-7.0\%} & \textbf{-4.5\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The hybrid agent demonstrates measurable improvements across all key metrics despite using the same 70\% CPU target as HPA. Specifically, it achieves 2.4\% faster response time (122ms vs 125ms), 7.0\% fewer SLA violations (1,067,836 vs 1,148,450), and 4.5\% lower operational costs (\$2,985,612 vs \$3,126,114).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{performance_comparison_20251011_203819.png}
+\caption{Performance comparison across key metrics between Hybrid DQN-PPO and Kubernetes HPA. The hybrid agent achieves better response time, fewer SLA violations, and lower costs while maintaining similar CPU utilization.}
+\label{fig:performance_comparison}
+\end{figure}
+
+\subsection{Scaling Behavior Analysis}
+Analysis of scaling decisions reveals fundamental differences in agent behavior:
+
+\begin{table}[H]
+\caption{Scaling Behavior Distribution}
+\label{tab:scaling}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Agent & Scale Up & Scale Down & No Change & Freq. \\
+\midrule
+HPA & 1.6\% & 1.5\% & 96.9\% & 121/hr \\
+Hybrid & 29.6\% & 21.4\% & 49.0\% & 1,745/hr \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+HPA exhibits conservative scaling behavior (96.9\% no-change decisions), making adjustments only when thresholds are breached. In contrast, the hybrid agent demonstrates adaptive behavior with pattern-aware adjustments (51\% active decisions), enabling proactive scaling before performance degradation occurs.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{performance_radar_20251011_203819.png}
+\caption{Radar chart showing normalized performance across all evaluation metrics. The hybrid agent maintains balanced performance across CPU efficiency, response time, SLA compliance, and cost optimization.}
+\label{fig:performance_radar}
+\end{figure}
+
+\subsection{Fair Comparison Validation}
+To ensure fair comparison, both agents use identical 70\% CPU targets. Performance differences arise from:
+\begin{itemize}
+    \item \textbf{Proactive vs Reactive}: RL anticipates load changes through pattern learning
+    \item \textbf{Multi-Objective Optimization}: Simultaneous optimization of response time, SLA, and cost
+    \item \textbf{Adaptive Behavior}: Continuous learning from traffic patterns vs static thresholds
+\end{itemize}
+
+\subsection{Key Insights}
+The 14.4× higher scaling frequency (1,745 vs 121 actions/hr) demonstrates that the hybrid agent makes fine-grained, pattern-aware adjustments rather than waiting for threshold breaches. This proactive behavior explains the superior performance despite identical CPU targets.
+
+\section{Conclusion}
+This study validates the effectiveness of hybrid DQN–PPO reinforcement learning for SLA-aware autoscaling in Kubernetes environments. Evaluated across 5 diverse traffic scenarios totaling 2,202 simulation steps, the approach demonstrates consistent improvements: 2.4\% faster response time, 7.0\% fewer SLA violations, and 4.5\% lower costs compared to Kubernetes HPA—despite using identical 70\% CPU targets for fair comparison. The results confirm that performance gains arise from proactive, pattern-aware decision making rather than manual threshold tuning. Future research will extend validation to production Kubernetes clusters with real workloads and investigate transfer learning across diverse deployment environments.
+
+\section*{Acknowledgment}
+The authors would like to thank Institut Teknologi Sepuluh Nopember (ITS) for providing the computational resources and research facilities. Special thanks to Prof. Dr. Ir. Mauridhi Hery Purnomo, M.Eng. and Dr. Feby Artwodini Muqtadiroh, S.Kom., M.T. for their invaluable guidance and supervision throughout this research.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references_enhanced}
+
+\end{document}
