@@ -15,6 +15,8 @@
 \usepackage{caption}
 \usepackage{float}
 \usepackage[margin=2.5cm]{geometry}
+\usepackage{algorithm}
+\usepackage{algorithmic}
 
 % Title
 \title{\textbf{Adaptive Autoscaling for Kubernetes Using Hybrid Deep Reinforcement Learning: A Comparative Study}}
@@ -185,15 +187,39 @@ where $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_
 
 \textbf{3. Hybrid Integration:}
 
-The hybrid system operates as follows:
-\begin{enumerate}
-    \item DQN selects scaling action: $a_t = \arg\max_a Q(s_t, a; \theta_{\text{DQN}})$
-    \item Base reward computed: $r_{\text{base}} = R(s_t, a_t, s_{t+1})$
-    \item PPO optimizes reward: $r_{\text{opt}} = r_{\text{base}} \cdot (1 + 0.3 \cdot m_{\text{PPO}})$
-    \item DQN trained on blended reward: $r_{\text{train}} = 0.7 \cdot r_{\text{base}} + 0.3 \cdot r_{\text{opt}}$
-\end{enumerate}
+The hybrid system operates through a carefully orchestrated interaction between both agents. At each decision point, DQN first selects the scaling action based on its learned Q-values. Then, the base reward gets computed from the environment's response to that action. PPO steps in to modulate this reward based on its learned value function, creating an optimized reward signal. Finally, DQN trains on a weighted blend of both the base and optimized rewards, which helps stabilize learning while still benefiting from PPO's continuous optimization.
 
-This blending strategy provides stable learning signals for DQN while incorporating PPO's adaptive optimization.
+\begin{algorithm}[H]
+\caption{Hybrid DQN-PPO Training Procedure}
+\begin{algorithmic}[1]
+\STATE Initialize DQN network $Q(s, a; \theta_{\text{DQN}})$ and target network $Q(s, a; \theta^-)$
+\STATE Initialize PPO actor-critic networks $\pi_\theta(a|s)$ and $V_\phi(s)$
+\STATE Initialize experience replay buffer $\mathcal{D} = \emptyset$
+\FOR{episode $= 1$ to $N$}
+    \STATE Reset environment, obtain initial state $s_0$
+    \FOR{timestep $t = 0$ to $T$}
+        \STATE Select action using $\epsilon$-greedy: $a_t = \arg\max_a Q(s_t, a; \theta_{\text{DQN}})$ with probability $1-\epsilon_t$
+        \STATE Execute $a_t$ in environment, observe reward $r_t$ and next state $s_{t+1}$
+        \STATE Compute base reward from environment: $r_{\text{base}} = R(s_t, a_t, s_{t+1})$
+        \STATE Query PPO for modulation factor: $m_{\text{PPO}} = \pi_\theta(a_t | s_t)$
+        \STATE Calculate optimized reward: $r_{\text{opt}} = r_{\text{base}} \cdot (1 + 0.3 \cdot m_{\text{PPO}})$
+        \STATE Blend rewards for training: $r_{\text{train}} = 0.7 \cdot r_{\text{base}} + 0.3 \cdot r_{\text{opt}}$
+        \STATE Store transition $(s_t, a_t, r_{\text{train}}, s_{t+1})$ in replay buffer $\mathcal{D}$
+        \IF{buffer contains sufficient samples}
+            \STATE Sample random minibatch from $\mathcal{D}$
+            \STATE Update DQN weights: $\theta_{\text{DQN}} \leftarrow \theta_{\text{DQN}} - \alpha \nabla_{\theta_{\text{DQN}}} L_{\text{DQN}}$
+        \ENDIF
+        \IF{$t \mod$ update\_frequency $= 0$}
+            \STATE Synchronize target network: $\theta^- \leftarrow \theta_{\text{DQN}}$
+        \ENDIF
+    \ENDFOR
+    \STATE Update PPO policy using collected trajectories: $\theta \leftarrow \theta - \alpha \nabla_\theta L^{\text{CLIP}}$
+    \STATE Update value network: $\phi \leftarrow \phi - \alpha \nabla_\phi L_V$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+This blending strategy ensures DQN receives stable learning signals from actual environment feedback while still benefiting from PPO's learned optimization. The 70-30 split between base and optimized rewards emerged from preliminary experiments testing various ratios.
 
 \subsection{Multi-Objective Reward Function}
 
