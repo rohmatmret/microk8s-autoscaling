@@ -323,7 +323,7 @@ def plot_action_distribution_by_scenario(ax, data, agents, scenarios):
     ax.set_title('Scaling Actions by Scenario', fontweight='bold', pad=10)
 
     colors = {'hybrid_dqn_ppo': '#2E86AB', 'k8s_hpa': '#A23B72'}
-    action_colors = {'scale_up': '#4CAF50', 'scale_down': '#FF6B6B', 'no_change': '#FFA726'}
+    action_colors = {'scale_up': '#4CAF50', 'scale_down': '#FF6B6B', 'no_change': '#808080'}
 
     # Extract data for all agents and scenarios
     agent_scenario_data = {}
@@ -521,8 +521,8 @@ def plot_performance_radar(ax, data, agents):
         ax.fill(angles, scores, alpha=0.15, color=color)
 
     ax.set_title('Multi-Metric Performance Comparison',
-                fontweight='bold', pad=20, fontsize=12)
-    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), framealpha=0.9)
+                fontweight='bold', pad=10, fontsize=11)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.15, 0.95), framealpha=0.9, fontsize=9)
 
 
 def plot_cost_comparison(ax, data, agents):
@@ -677,6 +677,16 @@ def create_comprehensive_visualization(data_file, output_dir=None):
     ax_summary.text(0.05, 0.95, summary_text, transform=ax_summary.transAxes,
             fontsize=9, verticalalignment='top', fontfamily='monospace',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+    # Adjust layout to prevent clipping (publication-quality)
+    fig.subplots_adjust(
+        top=0.95,      # Leave room for suptitle
+        bottom=0.06,
+        left=0.05,
+        right=0.97,
+        hspace=0.45,   # Vertical spacing between subplots
+        wspace=0.35    # Horizontal spacing between subplots
+    )
 
     # Save figure
     if output_dir is None:
