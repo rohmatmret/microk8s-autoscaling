@@ -40,7 +40,13 @@ def load_data(file_path):
 
         # Handle nested structure
         if 'results' in data:
-            return data['results']
+            # Preserve top-level analysis and timestamp if they exist
+            result = data['results'].copy()
+            if 'analysis' in data and 'analysis' not in result:
+                result['analysis'] = data['analysis']
+            if 'timestamp' in data and 'timestamp' not in result:
+                result['timestamp'] = data['timestamp']
+            return result
         return data
     except FileNotFoundError:
         print(f"❌ Error: File not found: {file_path}")
@@ -89,6 +95,31 @@ def extract_action_distribution(agent_data):
     return total_actions
 
 
+def extract_action_distribution_by_scenario(agent_data, scenarios):
+    """
+    Extract action distribution per scenario.
+
+    Returns:
+        dict: {scenario_name: {'scale_up': count, 'scale_down': count, 'no_change': count}}
+    """
+    scenario_actions = {}
+
+    for scenario_name in scenarios:
+        if scenario_name not in agent_data or not agent_data[scenario_name]:
+            continue
+
+        scenario_data = agent_data[scenario_name]
+
+        if len(scenario_data) > 0:
+            last_step = scenario_data[-1]
+            if 'action_distribution' in last_step:
+                scenario_actions[scenario_name] = last_step['action_distribution'].copy()
+            else:
+                scenario_actions[scenario_name] = {'scale_up': 0, 'scale_down': 0, 'no_change': 0}
+
+    return scenario_actions
+
+
 def plot_pod_count_timeline(ax, data, agents, scenario_name):
     """
     Plot 1: Pod count over time (BEST for showing scaling decisions)
@@ -131,6 +162,54 @@ def plot_pod_count_timeline(ax, data, agents, scenario_name):
 
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.set_ylim(bottom=0)
+
+
+def plot_pod_count_timeline_all_scenarios(axes, data, agents, scenarios):
+    """
+    Plot pod count timelines for all scenarios in a grid layout.
+    Shows agent behavior across different workload patterns.
+
+    Args:
+        axes: Array of matplotlib axes (one per scenario)
+        data: Full data dictionary
+        agents: List of agent names
+        scenarios: List of scenario names
+    """
+    colors = {'hybrid_dqn_ppo': '#2E86AB', 'k8s_hpa': '#A23B72'}
+    styles = {'hybrid_dqn_ppo': '-', 'k8s_hpa': '--'}
+
+    for idx, scenario_name in enumerate(scenarios):
+        ax = axes[idx] if len(scenarios) > 1 else axes
+
+        ax.set_title(f'{scenario_name.replace("_", " ").title()}',
+                     fontweight='bold', pad=8, fontsize=10)
+
+        for agent_name in agents:
+            if agent_name not in data:
+                continue
+
+            ts_data = extract_time_series(data[agent_name], scenario_name)
+            if ts_data is None:
+                continue
+
+            label = agent_name.replace('_', ' ').title()
+            color = colors.get(agent_name, 'gray')
+
+            # Plot actual pod count
+            ax.plot(ts_data['steps'], ts_data['pod_count'],
+                   color=color, linestyle=styles[agent_name], linewidth=2,
+                   label=f'{label}', marker='o', markersize=2, alpha=0.8)
+
+        ax.set_xlabel('Time Step', fontsize=9)
+        ax.set_ylabel('Pod Count', fontsize=9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_ylim(bottom=0)
+
+        # Only show legend on first subplot
+        if idx == 0:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(loc='best', framealpha=0.9, fontsize=8)
 
 
 def plot_cpu_utilization(ax, data, agents, scenario_name):
@@ -228,6 +307,91 @@ def plot_action_distribution_comparison(ax, data, agents):
     ax.legend(loc='best', framealpha=0.9)
     ax.grid(True, axis='y', alpha=0.3, linestyle='--')
     ax.set_ylim(0, 105)  # Extra space for labels
+
+
+def plot_action_distribution_by_scenario(ax, data, agents, scenarios):
+    """
+    Plot action distribution grouped by scenario.
+    Shows scaling decision patterns across different workload types.
+
+    Creates a grouped bar chart where:
+    - X-axis: Scenarios (baseline_steady, gradual_ramp, etc.)
+    - Y-axis: Action count
+    - Bars: Grouped by agent (different colors)
+    - Stacked: Actions types (scale_up, scale_down, no_change)
+    """
+    ax.set_title('Scaling Actions by Scenario', fontweight='bold', pad=10)
+
+    colors = {'hybrid_dqn_ppo': '#2E86AB', 'k8s_hpa': '#A23B72'}
+    action_colors = {'scale_up': '#4CAF50', 'scale_down': '#FF6B6B', 'no_change': '#FFA726'}
+
+    # Extract data for all agents and scenarios
+    agent_scenario_data = {}
+    for agent_name in agents:
+        if agent_name not in data:
+            continue
+        agent_scenario_data[agent_name] = extract_action_distribution_by_scenario(
+            data[agent_name], scenarios
+        )
+
+    # Filter scenarios that have data
+    scenarios_with_data = [s for s in scenarios
+                          if any(s in agent_scenario_data.get(agent, {})
+                                for agent in agents)]
+
+    if not scenarios_with_data:
+        ax.text(0.5, 0.5, 'No action distribution data available',
+               ha='center', va='center', fontsize=12)
+        return
+
+    # Prepare data for grouped bar chart
+    x = np.arange(len(scenarios_with_data))
+    width = 0.35
+    num_agents = len(agents)
+
+    for agent_idx, agent_name in enumerate(agents):
+        if agent_name not in agent_scenario_data:
+            continue
+
+        label = agent_name.replace('_', ' ').title()
+        offset = width * (agent_idx - (num_agents - 1) / 2)
+
+        # Prepare data for this agent across scenarios
+        scale_up_counts = []
+        scale_down_counts = []
+        no_change_counts = []
+
+        for scenario in scenarios_with_data:
+            actions = agent_scenario_data[agent_name].get(scenario,
+                                                          {'scale_up': 0, 'scale_down': 0, 'no_change': 0})
+            scale_up_counts.append(actions.get('scale_up', 0))
+            scale_down_counts.append(actions.get('scale_down', 0))
+            no_change_counts.append(actions.get('no_change', 0))
+
+        # Create stacked bars
+        agent_color = colors.get(agent_name, 'gray')
+
+        # Stack: scale_up at bottom, scale_down in middle, no_change on top
+        p1 = ax.bar(x + offset, scale_up_counts, width,
+                   label=f'{label} - Scale Up' if agent_idx == 0 else '',
+                   color=action_colors['scale_up'], alpha=0.8, edgecolor='black', linewidth=0.5)
+
+        p2 = ax.bar(x + offset, scale_down_counts, width, bottom=scale_up_counts,
+                   label=f'{label} - Scale Down' if agent_idx == 0 else '',
+                   color=action_colors['scale_down'], alpha=0.8, edgecolor='black', linewidth=0.5)
+
+        bottom_for_no_change = [up + down for up, down in zip(scale_up_counts, scale_down_counts)]
+        p3 = ax.bar(x + offset, no_change_counts, width, bottom=bottom_for_no_change,
+                   label=f'{label} - No Change' if agent_idx == 0 else '',
+                   color=action_colors['no_change'], alpha=0.8, edgecolor='black', linewidth=0.5)
+
+    ax.set_xlabel('Scenario', fontweight='bold')
+    ax.set_ylabel('Action Count', fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels([s.replace('_', ' ').title() for s in scenarios_with_data],
+                       rotation=15, ha='right', fontsize=8)
+    ax.legend(loc='upper right', framealpha=0.9, fontsize=7, ncol=2)
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--')
 
 
 def plot_response_time(ax, data, agents, scenario_name):
@@ -445,44 +609,56 @@ def create_comprehensive_visualization(data_file, output_dir=None):
 
     print(f"✅ Scenarios with data: {', '.join([s.replace('_', ' ').title() for s in scenarios_with_data])}")
 
-    # Create figure with subplots
-    fig = plt.figure(figsize=(20, 14))
-    gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+    # Create figure with new layout to accommodate all scenarios
+    num_scenarios = len(scenarios_with_data)
+    fig_height = 16 if num_scenarios >= 5 else 14
 
-    # Plot 1: Pod count timeline (first scenario with data)
+    fig = plt.figure(figsize=(22, fig_height))
+
+    # Create grid layout:
+    # - Top section (rows 0-1): Pod count timelines for all scenarios
+    # - Middle section (row 2): Action distribution by scenario
+    # - Bottom section (row 3): Radar chart, Cost comparison, Summary
+    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.4, wspace=0.3,
+                          height_ratios=[2, 2, 1.5, 1])
+
+    # Plot pod count timelines for all scenarios (arranged in grid)
     if scenarios_with_data:
-        ax1 = fig.add_subplot(gs[0, :2])
-        plot_pod_count_timeline(ax1, data, agents, scenarios_with_data[0])
+        # Arrange scenarios in a grid (up to 3 per row)
+        num_cols = min(3, num_scenarios)
+        num_rows = (num_scenarios + num_cols - 1) // num_cols  # Ceiling division
 
-        # Plot 2: CPU utilization
-        ax2 = fig.add_subplot(gs[0, 2])
-        plot_cpu_utilization(ax2, data, agents, scenarios_with_data[0])
+        for idx, scenario in enumerate(scenarios_with_data):
+            row = idx // num_cols
+            col = idx % num_cols
 
-    # Plot 3: Action distribution (MOST IMPORTANT for your question)
-    ax3 = fig.add_subplot(gs[1, :2])
-    plot_action_distribution_comparison(ax3, data, agents)
+            if row == 0:
+                ax_pod = fig.add_subplot(gs[row, col])
+            else:
+                ax_pod = fig.add_subplot(gs[row, col])
 
-    # Plot 4: Response time
-    if scenarios_with_data:
-        ax4 = fig.add_subplot(gs[1, 2])
-        plot_response_time(ax4, data, agents, scenarios_with_data[0])
+            plot_pod_count_timeline(ax_pod, data, agents, scenario)
 
-    # Plot 5: Radar chart (multi-metric comparison)
-    ax5 = fig.add_subplot(gs[2, 0], projection='polar')
-    plot_performance_radar(ax5, data, agents)
+    # Plot action distribution by scenario (spans full width of row 2)
+    ax_action = fig.add_subplot(gs[2, :])
+    plot_action_distribution_by_scenario(ax_action, data, agents, scenarios_with_data)
 
-    # Plot 6: Cost comparison
-    ax6 = fig.add_subplot(gs[2, 1])
-    plot_cost_comparison(ax6, data, agents)
+    # Plot radar chart (bottom left)
+    ax_radar = fig.add_subplot(gs[3, 0], projection='polar')
+    plot_performance_radar(ax_radar, data, agents)
+
+    # Plot cost comparison (bottom middle)
+    ax_cost = fig.add_subplot(gs[3, 1])
+    plot_cost_comparison(ax_cost, data, agents)
 
     # Add timestamp and metadata
     timestamp = data.get('timestamp', datetime.now().strftime('%Y%m%d_%H%M%S'))
-    fig.suptitle(f'Autoscaling Behavior Analysis - {timestamp}',
+    fig.suptitle(f'Autoscaling Behavior Analysis (Grouped by Scenario) - {timestamp}',
                 fontsize=16, fontweight='bold', y=0.995)
 
-    # Add summary text
-    ax7 = fig.add_subplot(gs[2, 2])
-    ax7.axis('off')
+    # Add summary text (bottom right)
+    ax_summary = fig.add_subplot(gs[3, 2])
+    ax_summary.axis('off')
 
     summary_text = "Visualization Summary\n" + "="*30 + "\n\n"
 
@@ -498,7 +674,7 @@ def create_comprehensive_visualization(data_file, output_dir=None):
                 summary_text += f"  Cost: ${metrics.get('total_cost', 0):,.0f}\n"
                 summary_text += f"  SLA Violations: {metrics.get('total_sla_violations', 0):,}\n\n"
 
-    ax7.text(0.05, 0.95, summary_text, transform=ax7.transAxes,
+    ax_summary.text(0.05, 0.95, summary_text, transform=ax_summary.transAxes,
             fontsize=9, verticalalignment='top', fontfamily='monospace',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
