@@ -9,18 +9,32 @@ spec:
     kind: Deployment
     name: nginx-deployment
   minReplicas: 1
-  maxReplicas: 5
+  maxReplicas: 10
   metrics:
   - type: Resource
     resource:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 20
+        averageUtilization: 70
   behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30
       policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 2
+        periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Percent
+        value: 70
+        periodSeconds: 60
       - type: Pods
         value: 1
-        periodSeconds: 15
+        periodSeconds: 70
+      selectPolicy: Min

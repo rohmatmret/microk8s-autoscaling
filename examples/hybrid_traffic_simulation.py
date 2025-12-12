@@ -521,29 +521,52 @@ class AgentPerformanceTester:
         action_counts = {"scale_up": 0, "scale_down": 0, "no_change": 0}
 
         # Simulation variables
-        current_pods = 1
-        cpu_utilization = 0.5
-        response_time = 0.1
+        # FIXED: Calculate proper initial pod count based on scenario base load
+        # This ensures FAIR comparison - all agents start from same initial conditions
+        pod_capacity = 500  # RPS per pod at 100% CPU
+        target_cpu = 0.70   # Target 70% CPU utilization
+
+        # Calculate initial pods needed for base load at target CPU
+        # FIXED: Use simulator.get_load(0) instead of scenario.traffic[0] (which doesn't exist)
+        # ALIGNED WITH statistical_validation_n30.py:240,356 for fair comparison
+        initial_load = simulator.get_load(0)  # Get actual first timestep load
+        initial_pods = max(1, int(np.ceil(initial_load / (pod_capacity * target_cpu))))
+        current_pods = initial_pods  # ✅ Fair initialization - matches statistical validation
+
+        # Calculate actual initial metrics based on load and pods
+        cpu_utilization = min(1.0, initial_load / (current_pods * pod_capacity))
+        response_time = max(0.05, 0.1 + (cpu_utilization - 0.7) * 0.5 if cpu_utilization > 0.7 else 0.1)
+        initial_throughput = min(initial_load, current_pods * pod_capacity)
+        initial_queue = max(0, initial_load - initial_throughput) / 100.0
+
+        logger.info(f"🔧 FAIR TEST INITIALIZATION: {agent_type}")
+        logger.info(f"   Scenario: {scenario.name}")
+        logger.info(f"   Base Load: {initial_load} RPS")
+        logger.info(f"   Pod Capacity: {pod_capacity} RPS/pod at 100% CPU")
+        logger.info(f"   Target CPU: {target_cpu * 100}%")
+        logger.info(f"   Initial Pods: {current_pods} (calculated for {target_cpu*100}% CPU)")
+        logger.info(f"   Expected Initial CPU: {cpu_utilization * 100:.1f}%")
+
         scaling_actions = []
         sla_violations = 0
         total_cost = 0.0
-        pod_history = [1]  # Track pod count history, starting with 1
+        pod_history = [current_pods]  # Track pod count history, starting with calculated pods
 
         try:
-            # Record initial state at step 0
+            # Record initial state at step 0 with CALCULATED metrics (not hardcoded)
             initial_metrics = AutoscalingMetrics(
-                cpu_utilization=cpu_utilization,
+                cpu_utilization=cpu_utilization,  # FIXED: Calculate from actual load
                 memory_utilization=0.5,
-                pod_count=current_pods,
-                target_pod_count=1,
-                response_time=response_time,
-                throughput=0.0,
-                queue_length=0.0,
+                pod_count=current_pods,  # FIXED: Use calculated initial pods
+                target_pod_count=initial_pods,
+                response_time=response_time,  # FIXED: Calculate from CPU
+                throughput=initial_throughput,  # FIXED: Calculate from load
+                queue_length=initial_queue,  # FIXED: Calculate from capacity
                 error_rate=0.0,
                 scaling_frequency=0.0,
                 scaling_latency=0.0,
-                over_provisioning_ratio=0.0,
-                under_provisioning_ratio=0.0,
+                over_provisioning_ratio=max(0, (current_pods * pod_capacity - initial_load) / initial_load) if initial_load > 0 else 0,
+                under_provisioning_ratio=max(0, (initial_load - current_pods * pod_capacity) / initial_load) if initial_load > 0 else 0,
                 resource_cost=0.0,
                 sla_violations=0,
                 availability=100.0,
