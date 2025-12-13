@@ -71,10 +71,10 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     # Set environment variables for publication mode
     export PUBLICATION_MODE="true"
     export STATISTICAL_VALIDATION="false"
-    export REAL_TIME_MONITORING="false"
+    export REAL_TIME_MONITORING="true"
 
     # Run performance tests
-    bash scripts/run-performance-test.sh || {
+    bash scripts/run-performance-test.sh comprehensive || {
         echo "Performance tests completed (check output above)"
     }
 

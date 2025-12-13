@@ -376,33 +376,72 @@ EOF
 import_dashboard() {
     print_info "Importing autoscaling dashboard to Grafana..."
 
-    local dashboard_file=$(find "$PROJECT_ROOT/metrics" -name "grafana_dashboard_*.json" -type f 2>/dev/null | head -1)
+    # Look for dashboard in multiple locations
+    local dashboard_file=""
+
+    # Priority 1: Project root (grafana_autoscaling_dashboard.json)
+    if [ -f "$PROJECT_ROOT/grafana_autoscaling_dashboard.json" ]; then
+        dashboard_file="$PROJECT_ROOT/grafana_autoscaling_dashboard.json"
+        print_info "Found research dashboard: $dashboard_file"
+    # Priority 2: metrics directory (old pattern)
+    elif [ -f "$PROJECT_ROOT/metrics/grafana_dashboard_*.json" ]; then
+        dashboard_file=$(find "$PROJECT_ROOT/metrics" -name "grafana_dashboard_*.json" -type f 2>/dev/null | head -1)
+        print_info "Found dashboard in metrics: $dashboard_file"
+    fi
 
     if [ -n "$dashboard_file" ] && [ -f "$dashboard_file" ]; then
-        print_info "Found dashboard file: $dashboard_file"
-
-        # Prepare dashboard for import
-        cat > /tmp/dashboard_import.json << EOF
+        # Check if dashboard JSON already has correct structure
+        if cat "$dashboard_file" | jq -e '.dashboard' >/dev/null 2>&1; then
+            # Already wrapped, use as-is
+            print_info "Dashboard JSON already wrapped, importing directly..."
+            cp "$dashboard_file" /tmp/dashboard_import.json
+        else
+            # Need to wrap
+            print_info "Wrapping dashboard JSON for import..."
+            cat > /tmp/dashboard_import.json << EOF
 {
-  "dashboard": $(cat "$dashboard_file" | jq '.dashboard' 2>/dev/null || cat "$dashboard_file"),
+  "dashboard": $(cat "$dashboard_file"),
   "folderId": 0,
   "overwrite": true
 }
 EOF
+        fi
 
-        # Import dashboard
-        if curl -X POST \
+        # Import dashboard with verbose output
+        print_info "Importing dashboard to Grafana..."
+        local response=$(curl -s -X POST \
             -H "Content-Type: application/json" \
             -u admin:admin \
             -d @/tmp/dashboard_import.json \
-            "http://localhost:$GRAFANA_PORT/api/dashboards/db" >/dev/null 2>&1; then
-            print_success "Dashboard imported successfully"
+            "http://localhost:$GRAFANA_PORT/api/dashboards/db")
+
+        local exit_code=$?
+
+        if [ $exit_code -eq 0 ]; then
+            # Check response for success
+            if echo "$response" | grep -q '"status":"success"'; then
+                local dashboard_uid=$(echo "$response" | jq -r '.uid' 2>/dev/null)
+                local dashboard_url=$(echo "$response" | jq -r '.url' 2>/dev/null)
+                print_success "Dashboard imported successfully!"
+                if [ -n "$dashboard_uid" ] && [ "$dashboard_uid" != "null" ]; then
+                    print_info "Dashboard UID: $dashboard_uid"
+                    print_info "Dashboard URL: http://localhost:$GRAFANA_PORT$dashboard_url"
+                fi
+            else
+                print_warning "Dashboard import response: $response"
+                # Try to extract error message
+                local error_msg=$(echo "$response" | jq -r '.message' 2>/dev/null)
+                if [ -n "$error_msg" ] && [ "$error_msg" != "null" ]; then
+                    print_warning "Error: $error_msg"
+                fi
+            fi
         else
-            print_warning "Dashboard import may have failed"
+            print_error "Failed to import dashboard (curl error: $exit_code)"
         fi
     else
         # Create a basic dashboard if none exists
-        print_warning "No dashboard file found, creating basic dashboard..."
+        print_warning "No dashboard file found in project root or metrics directory"
+        print_info "Creating basic dashboard..."
         create_basic_dashboard
     fi
 }
@@ -548,13 +587,19 @@ show_access_info() {
     print_header "SERVICE ACCESS INFORMATION"
 
     echo -e "${GREEN}🌐 Access URLs:${NC}"
-    echo -e "  📊 Grafana Dashboard: ${CYAN}http://localhost:$GRAFANA_PORT${NC}"
+    echo -e "  📊 Grafana Home: ${CYAN}http://localhost:$GRAFANA_PORT${NC}"
+    echo -e "  📊 Research Dashboard: ${CYAN}http://localhost:$GRAFANA_PORT/d/autoscaling-research${NC}"
     echo -e "  📈 Prometheus Metrics: ${CYAN}http://localhost:$PROMETHEUS_PORT${NC}"
     echo -e "  🔧 Metrics Service: ${CYAN}http://localhost:$METRICS_PORT/metrics${NC}"
     echo ""
     echo -e "${GREEN}📧 Grafana Login:${NC}"
     echo -e "  Username: ${YELLOW}admin${NC}"
     echo -e "  Password: ${YELLOW}admin${NC}"
+    echo ""
+    echo -e "${GREEN}📋 Dashboard Details:${NC}"
+    echo -e "  Dashboard UID: ${YELLOW}autoscaling-research${NC}"
+    echo -e "  Dashboard Title: ${YELLOW}Autoscaling Research Dashboard - Hybrid DQN-PPO vs K8s HPA${NC}"
+    echo -e "  Panels: ${YELLOW}24 panels in 6 sections${NC}"
     echo ""
     echo -e "${GREEN}🔍 Docker Containers:${NC}"
     docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -633,6 +678,13 @@ main() {
     export PUBLICATION_MODE=true
     export STATISTICAL_VALIDATION=true
     export REAL_TIME_MONITORING=true
+
+    # Enable realistic virtual time simulation for production-like metrics
+    # Each simulation step = 1-5 minutes of virtual time (random variance)
+    export SIMULATION_TIME_STEP_MINUTES="${SIMULATION_TIME_STEP_MINUTES:-1}"
+    export SIMULATION_TIME_STEP_VARIANCE="${SIMULATION_TIME_STEP_VARIANCE:-4}"
+
+    print_info "Virtual time simulation enabled: ${SIMULATION_TIME_STEP_MINUTES}±${SIMULATION_TIME_STEP_VARIANCE} minutes per step"
     ./scripts/run-performance-test.sh publication
 
     # Step 4: Create Docker network
@@ -671,11 +723,17 @@ main() {
     echo -e "${GREEN}✅ Complete Docker workflow finished!${NC}"
     echo ""
     echo -e "${CYAN}🎯 Next Steps:${NC}"
-    echo -e "1. 🌐 Open Grafana: ${YELLOW}http://localhost:$GRAFANA_PORT${NC}"
-    echo -e "2. 📊 Login with admin/admin credentials"
-    echo -e "3. 🔍 Explore your autoscaling performance dashboard"
-    echo -e "4. 📈 View real-time metrics in Prometheus: ${YELLOW}http://localhost:$PROMETHEUS_PORT${NC}"
-    echo -e "5. 📚 Check publication data in: ${YELLOW}publication_data/${NC}"
+    echo -e "1. 🌐 Open Research Dashboard: ${YELLOW}http://localhost:$GRAFANA_PORT/d/autoscaling-research${NC}"
+    echo -e "2. 📊 Login with admin/admin credentials (first time only)"
+    echo -e "3. 🔍 Explore 24 panels across 6 research sections"
+    echo -e "4. 🎛️  Use filters: Select agent (DQN-PPO/HPA) and scenario"
+    echo -e "5. 📈 View raw metrics in Prometheus: ${YELLOW}http://localhost:$PROMETHEUS_PORT${NC}"
+    echo -e "6. 📚 Check publication data in: ${YELLOW}publication_data/${NC}"
+    echo ""
+    echo -e "${PURPLE}📖 Documentation:${NC}"
+    echo -e "  Dashboard Guide: ${YELLOW}GRAFANA_DASHBOARD_GUIDE.md${NC}"
+    echo -e "  PromQL Reference: ${YELLOW}PROMQL_QUICK_REFERENCE.md${NC}"
+    echo -e "  Deployment Guide: ${YELLOW}DASHBOARD_DEPLOYMENT_GUIDE.md${NC}"
     echo ""
     echo -e "${GREEN}🔧 Management Commands:${NC}"
     echo -e "  Check status: ${YELLOW}$0 --status${NC}"

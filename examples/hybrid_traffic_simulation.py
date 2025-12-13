@@ -194,7 +194,7 @@ class PrometheusMetricsCollector:
 
     def record_metric(self, name: str, value: float, labels: Dict[str, str],
                      help_text: str = "") -> None:
-        """Record a metric with timestamp."""
+        """Record a metric with current real timestamp."""
         metric = PrometheusStyleMetric(
             name=name,
             value=value,
@@ -204,63 +204,78 @@ class PrometheusMetricsCollector:
         )
         self.metrics.append(metric)
 
+    def record_metric_with_timestamp(self, name: str, value: float, labels: Dict[str, str],
+                                     timestamp: float, help_text: str = "") -> None:
+        """Record a metric with specific timestamp (for virtual time)."""
+        metric = PrometheusStyleMetric(
+            name=name,
+            value=value,
+            labels=labels,
+            timestamp=timestamp,  # Use provided timestamp instead of time.time()
+            help_text=help_text
+        )
+        self.metrics.append(metric)
+
     def record_autoscaling_metrics(self, metrics: AutoscalingMetrics) -> None:
-        """Record comprehensive autoscaling metrics."""
+        """Record comprehensive autoscaling metrics with virtual time."""
         base_labels = {
             "agent": metrics.agent_type,
             "scenario": metrics.test_scenario,
             "instance": "autoscaler"
         }
 
+        # Use virtual timestamp from metrics object instead of real time
+        virtual_timestamp = metrics.timestamp
+
         # Resource metrics
-        self.record_metric("autoscaler_cpu_utilization", metrics.cpu_utilization, base_labels,
-                          "CPU utilization percentage")
-        self.record_metric("autoscaler_memory_utilization", metrics.memory_utilization, base_labels,
-                          "Memory utilization percentage")
-        self.record_metric("autoscaler_pod_count", metrics.pod_count, base_labels,
-                          "Current number of pods")
-        self.record_metric("autoscaler_target_pod_count", metrics.target_pod_count, base_labels,
-                          "Target number of pods")
+        self.record_metric_with_timestamp("autoscaler_cpu_utilization", metrics.cpu_utilization, base_labels,
+                          virtual_timestamp, "CPU utilization percentage")
+        self.record_metric_with_timestamp("autoscaler_memory_utilization", metrics.memory_utilization, base_labels,
+                          virtual_timestamp, "Memory utilization percentage")
+        self.record_metric_with_timestamp("autoscaler_pod_count", metrics.pod_count, base_labels,
+                          virtual_timestamp, "Current number of pods")
+        self.record_metric_with_timestamp("autoscaler_target_pod_count", metrics.target_pod_count, base_labels,
+                          virtual_timestamp, "Target number of pods")
 
         # Performance metrics
-        self.record_metric("autoscaler_response_time_seconds", metrics.response_time, base_labels,
-                          "Average response time in seconds")
-        self.record_metric("autoscaler_throughput_rps", metrics.throughput, base_labels,
-                          "Requests per second")
-        self.record_metric("autoscaler_queue_length", metrics.queue_length, base_labels,
-                          "Current queue length")
-        self.record_metric("autoscaler_error_rate", metrics.error_rate, base_labels,
-                          "Error rate percentage")
+        self.record_metric_with_timestamp("autoscaler_response_time_seconds", metrics.response_time, base_labels,
+                          virtual_timestamp, "Average response time in seconds")
+        self.record_metric_with_timestamp("autoscaler_throughput_rps", metrics.throughput, base_labels,
+                          virtual_timestamp, "Requests per second")
+        self.record_metric_with_timestamp("autoscaler_queue_length", metrics.queue_length, base_labels,
+                          virtual_timestamp, "Current queue length")
+        self.record_metric_with_timestamp("autoscaler_error_rate", metrics.error_rate, base_labels,
+                          virtual_timestamp, "Error rate percentage")
 
         # Scaling behavior
-        self.record_metric("autoscaler_scaling_frequency_per_hour", metrics.scaling_frequency, base_labels,
-                          "Scaling actions per hour")
-        self.record_metric("autoscaler_scaling_latency_seconds", metrics.scaling_latency, base_labels,
-                          "Time to complete scaling action")
-        self.record_metric("autoscaler_over_provisioning_ratio", metrics.over_provisioning_ratio, base_labels,
-                          "Ratio of over-provisioned resources")
-        self.record_metric("autoscaler_under_provisioning_ratio", metrics.under_provisioning_ratio, base_labels,
-                          "Ratio of under-provisioned resources")
+        self.record_metric_with_timestamp("autoscaler_scaling_frequency_per_hour", metrics.scaling_frequency, base_labels,
+                          virtual_timestamp, "Scaling actions per hour")
+        self.record_metric_with_timestamp("autoscaler_scaling_latency_seconds", metrics.scaling_latency, base_labels,
+                          virtual_timestamp, "Time to complete scaling action")
+        self.record_metric_with_timestamp("autoscaler_over_provisioning_ratio", metrics.over_provisioning_ratio, base_labels,
+                          virtual_timestamp, "Ratio of over-provisioned resources")
+        self.record_metric_with_timestamp("autoscaler_under_provisioning_ratio", metrics.under_provisioning_ratio, base_labels,
+                          virtual_timestamp, "Ratio of under-provisioned resources")
 
         # Cost and SLA
-        self.record_metric("autoscaler_resource_cost_dollars", metrics.resource_cost, base_labels,
-                          "Resource cost in dollars")
-        self.record_metric("autoscaler_sla_violations_total", metrics.sla_violations, base_labels,
-                          "Total SLA violations")
-        self.record_metric("autoscaler_availability_percentage", metrics.availability, base_labels,
-                          "Service availability percentage")
+        self.record_metric_with_timestamp("autoscaler_resource_cost_dollars", metrics.resource_cost, base_labels,
+                          virtual_timestamp, "Resource cost in dollars")
+        self.record_metric_with_timestamp("autoscaler_sla_violations_total", metrics.sla_violations, base_labels,
+                          virtual_timestamp, "Total SLA violations")
+        self.record_metric_with_timestamp("autoscaler_availability_percentage", metrics.availability, base_labels,
+                          virtual_timestamp, "Service availability percentage")
 
         # Agent-specific
-        self.record_metric("autoscaler_reward", metrics.reward, base_labels,
-                          "Agent reward signal")
-        self.record_metric("autoscaler_exploration_rate", metrics.exploration_rate, base_labels,
-                          "Agent exploration rate")
+        self.record_metric_with_timestamp("autoscaler_reward", metrics.reward, base_labels,
+                          virtual_timestamp, "Agent reward signal")
+        self.record_metric_with_timestamp("autoscaler_exploration_rate", metrics.exploration_rate, base_labels,
+                          virtual_timestamp, "Agent exploration rate")
 
         # Action distribution
         for action, count in metrics.action_distribution.items():
             action_labels = {**base_labels, "action": action}
-            self.record_metric("autoscaler_action_count", count, action_labels,
-                              "Count of scaling actions by type")
+            self.record_metric_with_timestamp("autoscaler_action_count", count, action_labels,
+                              virtual_timestamp, "Count of scaling actions by type")
 
     def export_to_file(self, filename: str = None) -> str:
         """Export metrics to Prometheus format file."""
@@ -552,6 +567,18 @@ class AgentPerformanceTester:
         total_cost = 0.0
         pod_history = [current_pods]  # Track pod count history, starting with calculated pods
 
+        # Virtual time simulation for realistic timestamps in mock mode
+        # Get time step duration from environment or use default
+        time_step_minutes = float(os.getenv('SIMULATION_TIME_STEP_MINUTES', '1'))
+        time_step_variance = float(os.getenv('SIMULATION_TIME_STEP_VARIANCE', '0'))  # 0-5 for random 1-5 min
+
+        # Initialize virtual clock
+        virtual_time = time.time()  # Start from current time
+
+        logger.info(f"⏰ SIMULATION TIMING: {time_step_minutes}±{time_step_variance} minutes per step")
+        logger.info(f"   Estimated duration: {scenario.duration_steps * time_step_minutes:.0f} virtual minutes "
+                   f"({scenario.duration_steps * time_step_minutes / 60:.1f} virtual hours)")
+
         try:
             # Record initial state at step 0 with CALCULATED metrics (not hardcoded)
             initial_metrics = AutoscalingMetrics(
@@ -573,7 +600,7 @@ class AgentPerformanceTester:
                 action_distribution=action_counts.copy(),
                 reward=0.0,
                 exploration_rate=0.0,
-                timestamp=time.time(),
+                timestamp=virtual_time,  # Use virtual time for realistic timestamps
                 agent_type=agent_type,
                 test_scenario=scenario.name
             )
@@ -581,6 +608,22 @@ class AgentPerformanceTester:
             self.metrics_collector.record_autoscaling_metrics(initial_metrics)
 
             for step in range(scenario.duration_steps):
+                # Advance virtual time by configured amount (with optional variance)
+                if time_step_variance > 0:
+                    # Random time step between base and base+variance minutes
+                    step_duration = np.random.uniform(time_step_minutes, time_step_minutes + time_step_variance)
+                else:
+                    step_duration = time_step_minutes
+
+                virtual_time += step_duration * 60  # Convert minutes to seconds
+
+                # Log progress with realistic timestamps every 10% of scenario
+                if step % max(1, scenario.duration_steps // 10) == 0:
+                    progress_pct = (step / scenario.duration_steps) * 100
+                    elapsed_virtual_hours = (virtual_time - metrics_history[0].timestamp) / 3600
+                    virtual_timestamp = datetime.fromtimestamp(virtual_time).strftime('%Y-%m-%d %H:%M:%S')
+                    logger.info(f"  📊 Progress: {progress_pct:.0f}% | Virtual time: {virtual_timestamp} "
+                               f"| Elapsed: {elapsed_virtual_hours:.1f}h | Pods: {current_pods}")
                 # Get current load from simulator
                 current_load = simulator.get_load(step)
 
@@ -666,7 +709,7 @@ class AgentPerformanceTester:
                         action_distribution=action_counts.copy(),
                         reward=reward,
                         exploration_rate=getattr(agent, 'epsilon', 0.0) if hasattr(agent, 'epsilon') else 0.0,
-                        timestamp=time.time(),
+                        timestamp=virtual_time,  # Use virtual time for realistic timestamps
                         agent_type=agent_type,
                         test_scenario=scenario.name
                     )
