@@ -482,7 +482,7 @@ class AgentPerformanceTester:
                 max_replicas=10,
                 scale_up_stabilization=5,     # Reduced: 30→5 steps (faster response in simulation)
                 scale_down_stabilization=30,  # Reduced: 180→30 steps (less over-provisioning)
-                tolerance=0.1                 # ±10% tolerance (63-77% band)
+                tolerance=0.1                 # ±10% tolerance (
             )
 
         else:
@@ -821,13 +821,18 @@ class AgentPerformanceTester:
                 pod_counts = [m.pod_count for m in all_metrics]
                 pod_variance = np.var(pod_counts) if len(pod_counts) > 1 else 0.0
 
+                # FIX: sla_violations is cumulative, take final value from each scenario then sum
+                total_sla = sum([scenario_metrics[-1].sla_violations
+                                for scenario_metrics in scenarios.values()
+                                if scenario_metrics])
+
                 analysis['agent_comparison'][agent_type] = {
                     'avg_cpu_utilization': np.mean([m.cpu_utilization for m in all_metrics]),
                     'avg_response_time': np.mean([m.response_time for m in all_metrics]),
                     'avg_pod_count': np.mean(pod_counts),
                     'pod_count_variance': pod_variance,
                     'pod_history': pod_counts[:10],  # First 10 samples for starting point verification
-                    'total_sla_violations': sum([m.sla_violations for m in all_metrics]),
+                    'total_sla_violations': total_sla,
                     'total_cost': sum([m.resource_cost for m in all_metrics]),
                     'avg_reward': np.mean([m.reward for m in all_metrics]),
                     'scaling_efficiency': np.mean([m.scaling_frequency for m in all_metrics])
