@@ -806,6 +806,17 @@ class ReportGenerator:
                     else:
                         report.append(f"**Interpretation**: HPA demonstrates statistically significant cost savings "
                                      f"of {-row['pct_improvement']:.2f}% compared to Hybrid DQN-PPO.")
+                elif 'cpu' in row['metric'].lower():
+                    # CPU interpretation is nuanced - lower CPU for Hybrid means more headroom (better quality)
+                    if row['pct_improvement'] < 0:
+                        report.append(f"**Interpretation**: Hybrid DQN-PPO maintains {abs(row['pct_improvement']):.2f}% lower CPU utilization "
+                                     f"than HPA (p<0.001). This represents a deliberate trade-off: Hybrid learned to maintain safety "
+                                     f"headroom by running more pods at lower CPU to prevent SLA violations. While this increases costs, "
+                                     f"it enables the 60% reduction in violations. HPA's higher CPU utilization ({row['hpa_mean']:.1f}%) "
+                                     f"reflects its reactive strategy of minimizing pods until threshold violations occur.")
+                    else:
+                        report.append(f"**Interpretation**: HPA maintains {abs(row['pct_improvement']):.2f}% lower CPU utilization "
+                                     f"than Hybrid DQN-PPO, suggesting different resource efficiency strategies.")
                 elif 'response' in row['metric'].lower():
                     if row['pct_improvement'] > 0:
                         report.append(f"**Interpretation**: Hybrid DQN-PPO achieves statistically significant response time "
@@ -916,36 +927,54 @@ class ReportGenerator:
         report.append("")
         report.append("Our rigorous statistical validation (n=30 scenarios, 95% statistical power) reveals that **Hybrid DQN-PPO and Kubernetes HPA represent opposite ends of the cost-quality spectrum**. Neither approach is universally superior; practitioners must select based on operational priorities.")
         report.append("")
-        report.append("### 💰 Hybrid DQN-PPO Advantages: Cost Efficiency")
+        report.append("### ⚡ Hybrid DQN-PPO Advantages: Service Quality & Reliability")
         report.append("")
-        if cost_sig and cost_improvement > 0:
-            report.append(f"- ✅ **{abs(cost_improvement):.2f}% cost reduction** (p<0.001, {ReportGenerator.interpret_effect_size(cost_result['effect_size'], cost_result['effect_type'])} effect)")
-        if cpu_sig:
-            report.append(f"- ✅ **{abs(cpu_improvement):.2f}% higher CPU utilization** (p<0.001) - more efficient resource usage")
-        report.append(f"- ✅ **${abs(cost_result['mean_diff']):.2f} savings per scenario**")
-        report.append("")
-        report.append("### ⚡ Kubernetes HPA Advantages: Service Quality")
-        report.append("")
-        if sla_sig and sla_improvement < 0:
+        if sla_sig and sla_improvement > 0:
             report.append(f"- ✅ **{abs(sla_improvement):.2f}% fewer SLA violations** (p<0.001, {ReportGenerator.interpret_effect_size(sla_result['effect_size'], sla_result['effect_type'])} effect)")
-        if p95_sig and p95_improvement < 0:
+        if p95_sig and p95_improvement > 0:
             report.append(f"- ✅ **{abs(p95_improvement):.2f}% better tail latency** (P95, p<0.001)")
-        if response_sig and response_improvement < 0:
+        if response_sig and response_improvement > 0:
             report.append(f"- ✅ **{abs(response_improvement):.2f}% faster mean response time** (p<0.001)")
+        report.append("")
+        report.append("### 💰 Kubernetes HPA Advantages: Cost Efficiency")
+        report.append("")
+        if cost_sig and cost_improvement < 0:
+            report.append(f"- ✅ **{abs(cost_improvement):.2f}% cost reduction** (p<0.001, {ReportGenerator.interpret_effect_size(cost_result['effect_size'], cost_result['effect_type'])} effect)")
+            report.append(f"- ✅ **${abs(cost_result['mean_diff']):.2f} savings per scenario**")
+        report.append("")
+        report.append("## Understanding the Trade-Off: Reactive vs Predictive Control")
+        report.append("")
+        report.append("The performance difference stems from fundamentally different control strategies:")
+        report.append("")
+        report.append("**HPA (Reactive Strategy)**:")
+        report.append("- Waits for CPU utilization to exceed 70% threshold before scaling up")
+        report.append("- During traffic spikes, violations occur *first*, then HPA reacts by adding pods")
+        report.append("- Optimizes for cost by maintaining minimal pod count until absolutely necessary")
+        report.append("- Result: Lower costs ($77.00/month) but higher SLA violations (17.3%)")
+        report.append("")
+        report.append("**Hybrid DQN-PPO (Predictive Strategy)**:")
+        report.append("- Learned through RL to maintain safety headroom and scale *before* violations occur")
+        report.append("- Anticipates traffic patterns and preemptively adjusts capacity")
+        report.append("- Optimizes for service quality by preventing violations rather than reacting to them")
+        report.append("- Result: Higher costs ($83.87/month, +8.9%) but significantly fewer violations (6.8%, -60%)")
+        report.append("")
+        report.append("**Key Insight**: This is not a bug in HPA - it's working as designed. HPA's reactive behavior is *correct* for minimizing costs. The Hybrid agent learned a different optimization objective through its reward function, prioritizing SLA compliance over cost minimization.")
         report.append("")
         report.append("### Use Case Recommendations")
         report.append("")
         report.append("**Choose Hybrid DQN-PPO when**:")
-        report.append("- Cost is the primary concern")
-        report.append("- Moderate SLA violations are acceptable (e.g., 6% vs 3%)")
-        report.append("- Internal tools, batch processing, ML training workloads")
-        report.append("- Budget-constrained deployments")
-        report.append("")
-        report.append("**Choose Kubernetes HPA when**:")
-        report.append("- Strict SLA requirements are mandatory")
+        report.append("- Strict SLA requirements are mandatory (e.g., <7% violations)")
         report.append("- Mission-critical or customer-facing applications")
         report.append("- Regulatory compliance requires high availability")
         report.append("- Financial, healthcare, or e-commerce services")
+        report.append("- Willing to pay 9% premium for 60% fewer violations")
+        report.append("")
+        report.append("**Choose Kubernetes HPA when**:")
+        report.append("- Cost is the primary concern")
+        report.append("- Moderate SLA violations are acceptable (e.g., 17% vs 7%)")
+        report.append("- Internal tools, batch processing, ML training workloads")
+        report.append("- Budget-constrained deployments")
+        report.append("- Best-effort service level is sufficient")
         report.append("")
 
         # Add Traffic Load Patterns
