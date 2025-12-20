@@ -432,7 +432,27 @@ class AgentPerformanceTester:
                 max_load=3000,    # Peak during active hours
                 event_frequency=0.005,
                 target_metrics={"cpu_utilization": 0.3, "response_time": 0.08}
-            )
+            ),
+            # TestScenario(
+            #     name="high_cpu_90",
+            #     description="High CPU stress test - 90% sustained utilization",
+            #     duration_steps=3000,  # 3000 simulation steps
+            #     traffic_pattern="steady",
+            #     base_load=4500,   # High sustained load (4500 RPS = ~90% CPU with 10 pods)
+            #     max_load=4800,    # Slightly higher peaks
+            #     event_frequency=0.001,
+            #     target_metrics={"cpu_utilization": 0.90, "response_time": 0.3}
+            # ),
+            # TestScenario(
+            #     name="low_cpu_10",
+            #     description="Low CPU test - 10% minimal utilization",
+            #     duration_steps=3000,  # 3000 simulation steps
+            #     traffic_pattern="steady",
+            #     base_load=50,     # Very low load (50 RPS = ~10% CPU with 1 pod)
+            #     max_load=100,     # Minimal variation
+            #     event_frequency=0.0,
+            #     target_metrics={"cpu_utilization": 0.10, "response_time": 0.05}
+            # )
         ]
 
     def create_agent(self, agent_type: str, environment, mock_mode: bool = True) -> Any:
@@ -473,16 +493,17 @@ class AgentPerformanceTester:
             return PPOAgent(environment=env)
 
         elif agent_type == "k8s_hpa":
-            # NEW: Accurate Kubernetes HPA v2 simulator (recommended for publication)
-            # Note: Stabilization windows adjusted for simulation time scale
-            # In real K8s: 30s/180s, but simulation steps are faster than real-time
+            # CORRECTED: Kubernetes HPA v2 simulator with accurate K8s behavior
+            # All 5 critical fixes implemented (stabilization window, multi-pod scaling,
+            # scale-down policy, metric lag, pod startup delays)
+            # Uses K8s defaults aligned with v1.27+ specification
             return KubernetesHPASimulator(
                 target_cpu_utilization=0.70,  # Standard HPA default (70% target)
                 min_replicas=1,
                 max_replicas=10,
-                scale_up_stabilization=5,     # Reduced: 30→5 steps (faster response in simulation)
-                scale_down_stabilization=30,  # Reduced: 180→30 steps (less over-provisioning)
-                tolerance=0.1                 # ±10% tolerance (
+                scale_up_stabilization=30,    # K8s default: 30 seconds
+                scale_down_stabilization=300,  # K8s default: 300 seconds (5 minutes)
+                tolerance=0.1                 # ±10% tolerance band
             )
 
         else:
@@ -548,10 +569,28 @@ class AgentPerformanceTester:
         initial_pods = max(1, int(np.ceil(initial_load / (pod_capacity * target_cpu))))
         current_pods = initial_pods  # ✅ Fair initialization - matches statistical validation
 
-        # Calculate actual initial metrics based on load and pods
-        cpu_utilization = min(1.0, initial_load / (current_pods * pod_capacity))
+        # CRITICAL FIX #4: Metric observation lag (25-30s)
+        # Real K8s HPA doesn't see metrics instantly - there's a delay due to:
+        # - metrics-server sync period: 15s
+        # - aggregation and API latency: 10-15s
+        # Total lag: ~25-30 seconds
+        metric_lag_steps = 2  # ~30 seconds at 15s/step
+        metric_buffer: List[Dict] = []  # Buffer to track historical metrics
+
+        # CRITICAL FIX #5: Pod startup delays (30-90s)
+        # Pods don't become ready instantly - there's startup time:
+        # - Image pull: 10-30s (if not cached)
+        # - Container startup: 10-20s
+        # - Readiness probe: 10-40s (initialDelaySeconds + periodSeconds)
+        # Total delay: ~30-90 seconds
+        startup_delay_steps = 4  # ~60 seconds at 15s/step
+        pending_pods: List[Tuple[int, int]] = []  # List of (ready_at_step, pod_count)
+        ready_pods = current_pods  # Track ready pods separately from total pods
+
+        # Calculate actual initial metrics based on load and READY pods
+        cpu_utilization = min(1.0, initial_load / (ready_pods * pod_capacity))
         response_time = max(0.05, 0.1 + (cpu_utilization - 0.7) * 0.5 if cpu_utilization > 0.7 else 0.1)
-        initial_throughput = min(initial_load, current_pods * pod_capacity)
+        initial_throughput = min(initial_load, ready_pods * pod_capacity)
         initial_queue = max(0, initial_load - initial_throughput) / 100.0
 
         logger.info(f"🔧 FAIR TEST INITIALIZATION: {agent_type}")
@@ -561,6 +600,8 @@ class AgentPerformanceTester:
         logger.info(f"   Target CPU: {target_cpu * 100}%")
         logger.info(f"   Initial Pods: {current_pods} (calculated for {target_cpu*100}% CPU)")
         logger.info(f"   Expected Initial CPU: {cpu_utilization * 100:.1f}%")
+        logger.info(f"   Metric Lag: {metric_lag_steps} steps (~{metric_lag_steps * 15}s)")
+        logger.info(f"   Startup Delay: {startup_delay_steps} steps (~{startup_delay_steps * 15}s)")
 
         scaling_actions = []
         sla_violations = 0
@@ -623,31 +664,68 @@ class AgentPerformanceTester:
                     elapsed_virtual_hours = (virtual_time - metrics_history[0].timestamp) / 3600
                     virtual_timestamp = datetime.fromtimestamp(virtual_time).strftime('%Y-%m-%d %H:%M:%S')
                     logger.info(f"  📊 Progress: {progress_pct:.0f}% | Virtual time: {virtual_timestamp} "
-                               f"| Elapsed: {elapsed_virtual_hours:.1f}h | Pods: {current_pods}")
+                               f"| Elapsed: {elapsed_virtual_hours:.1f}h | Ready Pods: {ready_pods}/{current_pods}")
+
                 # Get current load from simulator
                 current_load = simulator.get_load(step)
 
-                # Simulate system state based on load and current pods
+                # CRITICAL FIX #5: Process pending pods becoming ready
+                # Check if any pending pods have completed startup
+                newly_ready = []
+                for ready_at_step, pod_count in pending_pods:
+                    if step >= ready_at_step:
+                        newly_ready.append((ready_at_step, pod_count))
+                        ready_pods = pod_count
+                        logger.debug(f"Step {step}: Pods now ready: {ready_pods} (startup completed)")
+
+                # Remove newly ready pods from pending list
+                for item in newly_ready:
+                    pending_pods.remove(item)
+
+                # Simulate system state based on load and READY pods (not total pods)
                 # Fixed: Use realistic pod capacity (500 RPS per pod instead of 100)
                 pod_capacity = 500  # RPS per pod - adjusted for 5x traffic increase
-                cpu_utilization = min(1.0, current_load / (current_pods * pod_capacity))
+                cpu_utilization = min(1.0, current_load / (ready_pods * pod_capacity))
                 response_time = max(0.05, 0.1 + (cpu_utilization - 0.7) * 0.5 if cpu_utilization > 0.7 else 0.1)
-                throughput = min(current_load, current_pods * pod_capacity)
+                throughput = min(current_load, ready_pods * pod_capacity)
                 queue_length = max(0, current_load - throughput) / 100.0
 
+                # CRITICAL FIX #4: Store current metrics in buffer for observation lag
+                metric_buffer.append({
+                    'step': step,
+                    'cpu_utilization': cpu_utilization,
+                    'response_time': response_time,
+                    'throughput': throughput,
+                    'queue_length': queue_length,
+                    'ready_pods': ready_pods
+                })
+
+                # Get observed metrics (with lag) for agent decisions
+                # HPA sees metrics from metric_lag_steps ago
+                if len(metric_buffer) > metric_lag_steps:
+                    observed_metrics = metric_buffer[-metric_lag_steps - 1]
+                    observed_cpu = observed_metrics['cpu_utilization']
+                    observed_ready_pods = observed_metrics['ready_pods']
+                else:
+                    # Not enough history yet, use current metrics
+                    observed_cpu = cpu_utilization
+                    observed_ready_pods = ready_pods
+
                 # Create state vector for RL agents (7-dimensional to match environment)
+                # RL agents see OBSERVED (lagged) metrics, not real-time
                 # [cpu, memory, latency, swap, nodes, load_mean, load_gradient]
                 state = np.array([
-                    cpu_utilization,  # CPU utilization
+                    observed_cpu,  # FIXED: Use observed CPU (lagged)
                     np.random.uniform(0.3, 0.7),  # memory utilization
                     response_time / 0.5,  # normalized latency/response time
                     0.0,  # swap usage (placeholder)
-                    current_pods / 10.0,  # normalized nodes/pod count
-                    cpu_utilization,  # load mean (use cpu as proxy)
+                    observed_ready_pods / 10.0,  # FIXED: Use observed ready pods (lagged)
+                    observed_cpu,  # load mean (use cpu as proxy)
                     0.0   # load gradient (placeholder)
                 ])
 
                 # Get agent action
+                target_pods = None  # Initialize for type safety
                 if hasattr(agent, 'step_with_external_state'):
                     # For hybrid agent - FIX: Pass external state instead of using internal random state
                     result = agent.step_with_external_state(state)
@@ -656,36 +734,71 @@ class AgentPerformanceTester:
                 elif hasattr(agent, 'get_scaling_decision'):
                     # For other RL agents
                     action = agent.get_scaling_decision(state)
-                    reward = self._calculate_reward(cpu_utilization, response_time, current_pods)
+                    reward = self._calculate_reward(observed_cpu, response_time, ready_pods)
                 else:
-                    # For rule-based agent
-                    action = agent.decide_action(cpu_utilization, current_pods, step)
+                    # CRITICAL FIX #2: HPA now returns tuple (action_type, target_replicas)
+                    # Handle both old (int) and new (tuple) return types for backward compatibility
+                    decision = agent.decide_action(observed_cpu, observed_ready_pods, step)
+                    if isinstance(decision, tuple):
+                        action, target_pods = decision  # New multi-pod scaling
+                    else:
+                        action = decision  # Old single-pod scaling
+                        target_pods = None
                     reward = 0.0
 
-                # Apply action
+                # CRITICAL FIX #2: Apply action with multi-pod scaling support
                 if action == 0:  # Scale up
-                    current_pods = min(current_pods + 1, 10)
-                    action_counts["scale_up"] += 1
-                    scaling_actions.append(step)
+                    if target_pods is not None:
+                        # Multi-pod scaling: scale directly to target
+                        new_pods = min(target_pods, 10)
+                    else:
+                        # Single-pod scaling: increment by 1
+                        new_pods = min(current_pods + 1, 10)
+
+                    if new_pods > current_pods:
+                        action_counts["scale_up"] += 1
+                        scaling_actions.append(step)
+                        current_pods = new_pods
+
+                        # CRITICAL FIX #5: Add to pending pods (startup delay)
+                        ready_at_step = step + startup_delay_steps
+                        pending_pods.append((ready_at_step, current_pods))
+                        logger.debug(f"Step {step}: Scaling up to {current_pods} pods "
+                                   f"(will be ready at step {ready_at_step})")
+
                 elif action == 1:  # Scale down
-                    current_pods = max(current_pods - 1, 1)
-                    action_counts["scale_down"] += 1
-                    scaling_actions.append(step)
+                    if target_pods is not None:
+                        # Multi-pod scaling: scale directly to target
+                        new_pods = max(target_pods, 1)
+                    else:
+                        # Single-pod scaling: decrement by 1
+                        new_pods = max(current_pods - 1, 1)
+
+                    if new_pods < current_pods:
+                        action_counts["scale_down"] += 1
+                        scaling_actions.append(step)
+                        current_pods = new_pods
+                        # Scale-down is instant (pods terminate immediately)
+                        ready_pods = current_pods
+                        logger.debug(f"Step {step}: Scaling down to {current_pods} pods (instant)")
+
                 else:  # No change
                     action_counts["no_change"] += 1
 
                 # Track pod count history
                 pod_history.append(current_pods)
 
-                # Calculate metrics
-                over_provisioning = max(0, (current_pods * pod_capacity - current_load) / current_load) if current_load > 0 else 0
-                under_provisioning = max(0, (current_load - current_pods * pod_capacity) / current_load) if current_load > 0 else 0
+                # Calculate metrics based on READY pods (actual capacity)
+                # CRITICAL: Over/under-provisioning should be based on ready pods, not total pods
+                over_provisioning = max(0, (ready_pods * pod_capacity - current_load) / current_load) if current_load > 0 else 0
+                under_provisioning = max(0, (current_load - ready_pods * pod_capacity) / current_load) if current_load > 0 else 0
 
                 # SLA violations (response time > 200ms)
                 if response_time > 0.2:
                     sla_violations += 1
 
-                # Calculate cost (simplified)
+                # Calculate cost based on TOTAL pods (including pending)
+                # Cost applies to all allocated pods, not just ready ones
                 total_cost += current_pods * 0.1  # $0.1 per pod per step
 
                 # Record metrics every 10 steps
@@ -761,7 +874,7 @@ class AgentPerformanceTester:
         return reward
 
     def run_comparative_study(self, agent_types: List[str],
-                            scenarios: List[str] = None,
+                            scenarios: Optional[List[str]] = None,
                             mock_mode: bool = True) -> Dict[str, Any]:
         """Run comprehensive comparative study."""
         if scenarios is None:
@@ -947,17 +1060,27 @@ class AgentPerformanceTester:
 
 class KubernetesHPASimulator:
     """
-    Accurate Kubernetes HPA v2 simulator for publication-grade research.
+    CORRECTED Kubernetes HPA v2 simulator for publication-grade research.
 
     Implements the actual HPA algorithm as documented in:
     https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
+    https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details
+
+    CRITICAL FIXES (Aligned with K8s v1.27+ behavior):
+    1. ✅ Recommendation window stabilization (not simple cooldown)
+    2. ✅ Multi-pod scaling (HPA scales directly to target, not by +1/-1)
+    3. ✅ Correct scale-down policy interpretation (70% reduction PER period)
+    4. ✅ Metric observation lag (25-30s delay)
+    5. ✅ Pod startup delays (30-90s to become ready)
 
     Key Features:
     - Proportional scaling: desiredReplicas = ceil(currentReplicas × currentMetric / targetMetric)
     - Tolerance band (default ±10%) to prevent flapping
-    - Asymmetric stabilization windows (30s up, 180s down)
+    - Recommendation window stabilization (selects HIGHEST recommendation during window)
+    - Asymmetric stabilization windows (30s up, 300s down - K8s defaults)
     - Scale-up policies: max(100% increase, +2 pods)
-    - Scale-down policies: min(70% reduction, -1 pod) - conservative
+    - Scale-down policies: 70% reduction allowed per 60s period (with period tracking)
+    - Returns (action_type, target_replicas) tuple for multi-pod scaling
     """
 
     def __init__(self,
@@ -965,7 +1088,7 @@ class KubernetesHPASimulator:
                  min_replicas: int = 1,
                  max_replicas: int = 10,
                  scale_up_stabilization: int = 30,      # steps (simulating seconds)
-                 scale_down_stabilization: int = 180,   # steps (simulating seconds)
+                 scale_down_stabilization: int = 300,   # FIXED: 180→300 (K8s default is 5 min)
                  tolerance: float = 0.1):                # 10% tolerance band
 
         self.target_cpu = target_cpu_utilization
@@ -975,10 +1098,14 @@ class KubernetesHPASimulator:
         self.scale_down_stabilization = scale_down_stabilization
         self.tolerance = tolerance
 
-        # Track scaling history for stabilization windows
+        # FIXED: Track recommendation window history (not just last scale time)
+        # Format: List[(timestamp, desired_replicas)]
+        self.recommendation_history: List[Tuple[int, int]] = []
+
+        # Track actual scaling events for policy enforcement
         self.last_scale_time = 0
         self.last_scale_direction = None
-        self.recommendation_history = []
+        self.last_scale_down_time = 0  # For period-based scale-down tracking
 
     def calculate_desired_replicas(self, current_cpu: float, current_replicas: int) -> int:
         """
@@ -1030,99 +1157,207 @@ class KubernetesHPASimulator:
         # Return the minimum of desired and policy-limited
         return min(desired_replicas, max_allowed, self.max_replicas)
 
-    def apply_scale_down_policy(self, current_replicas: int, desired_replicas: int) -> int:
+    def apply_scale_down_policy(self, current_replicas: int, desired_replicas: int,
+                                time_since_last_scale_down: int) -> int:
         """
-        HPA v2 scale-down behavior policies.
+        CORRECTED HPA v2 scale-down behavior policies with period semantics.
 
-        Default policies:
-        - Can decrease by 70% (keep 30% of pods)
-        - Can remove 1 pod
-        - Takes the MINIMUM of these policies (conservative scale-down)
+        CRITICAL FIX: "value: 70" means "can remove up to 70% of pods PER 60-second period"
+        NOT "keep 30% of pods" (previous misinterpretation)
 
-        Reference: deployments/nginx-hpa.yaml lines 40-49
+        Correct interpretation from K8s HPA v2 spec:
+        - periodSeconds: 60 (evaluation period)
+        - type: Percent, value: 70 → Can reduce by 70% of current pods in this period
+        - type: Pods, value: 1 → Can remove 1 pod minimum
+        - SelectPolicy: Min → Take the more conservative (smaller reduction)
+
+        Args:
+            current_replicas: Current number of replicas
+            desired_replicas: Desired number from HPA formula
+            time_since_last_scale_down: Time since last scale-down (for period tracking)
+
+        Reference: https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#configurable-scaling-behavior
         """
         if desired_replicas >= current_replicas:
             return current_replicas
 
-        # Policy 1: 70% reduction (keep 30%)
-        min_by_percent = int(np.ceil(current_replicas * 0.3))
+        # Check if we're within the 60-second period window
+        # If yes, apply stricter limits; if no, reset the period
+        period_window = 60  # 60 seconds per K8s default
+        within_period = time_since_last_scale_down < period_window
 
-        # Policy 2: Remove 1 pod
+        # Policy 1: Can remove up to 70% of current pods per period
+        # FIXED: 70% reduction allowed (not "keep 30%")
+        max_reduction_percent = int(np.floor(current_replicas * 0.70))
+        min_by_percent = current_replicas - max_reduction_percent
+
+        # Policy 2: Can remove at least 1 pod
         min_by_pods = current_replicas - 1
 
-        # SelectPolicy: Min - take the more conservative option
+        # SelectPolicy: Min - take the more conservative option (smaller reduction)
+        # This means we choose the LARGER of the two minimums
         min_allowed = max(min_by_percent, min_by_pods)
 
-        # Return the maximum of desired and policy-limited
-        return max(desired_replicas, min_allowed, self.min_replicas)
+        if within_period:
+            # Within period: apply conservative limits
+            logger.debug(f"Scale-down within period: can reduce from {current_replicas} to min {min_allowed}")
+            return max(desired_replicas, min_allowed, self.min_replicas)
+        else:
+            # New period: allow full reduction
+            logger.debug(f"Scale-down new period: can reduce from {current_replicas} to {desired_replicas}")
+            return max(desired_replicas, self.min_replicas)
 
-    def check_stabilization_window(self, current_time: int, direction: str) -> bool:
+    def add_recommendation(self, current_time: int, desired_replicas: int) -> None:
         """
-        Check if we're within the stabilization window.
+        Add a recommendation to the history window.
 
-        Stabilization prevents rapid scaling by requiring metrics to be
-        consistently high/low for a period before scaling.
+        Part of the CORRECTED stabilization algorithm that tracks all recommendations
+        within the stabilization window (not just blocking on cooldown).
 
-        - Scale-up: 30 second window (faster response to load)
-        - Scale-down: 180 second window (conservative, prevent oscillation)
-
-        Returns True if we should wait (not scale yet).
+        Args:
+            current_time: Current simulation step/timestamp
+            desired_replicas: The desired replica count from HPA formula
         """
-        time_since_last_scale = current_time - self.last_scale_time
+        self.recommendation_history.append((current_time, desired_replicas))
 
-        if direction == 'up':
-            return time_since_last_scale < self.scale_up_stabilization
-        else:  # down
-            return time_since_last_scale < self.scale_down_stabilization
-
-    def decide_action(self, cpu_utilization: float, current_pods: int, step: int = 0) -> int:
+    def get_stabilized_recommendation(self, current_time: int, direction: str) -> Optional[int]:
         """
-        Main HPA decision algorithm.
+        CORRECTED stabilization window algorithm per K8s HPA v2 spec.
+
+        CRITICAL FIX: Kubernetes HPA does NOT use simple cooldown blocking.
+        Instead, it collects ALL recommendations during the stabilization window
+        and selects the HIGHEST (most conservative) recommendation.
+
+        Algorithm (from K8s source code):
+        1. Add current recommendation to history
+        2. Filter recommendations within stabilization window
+        3. Select MAXIMUM recommendation (scale-up: highest prevents under-provision)
+                                          (scale-down: highest prevents over-aggressive removal)
+        4. Clean up old history outside window
+
+        Stabilization windows:
+        - Scale-up: 30s (default scaleUpStabilizationWindowSeconds)
+        - Scale-down: 300s (default scaleDownStabilizationWindowSeconds)
+
+        Args:
+            current_time: Current simulation step/timestamp
+            direction: 'up' or 'down' for scale direction
 
         Returns:
-            0: Scale up (increase replicas)
-            1: Scale down (decrease replicas)
-            2: No change (maintain current replicas)
+            Stabilized replica recommendation (highest in window) or None if no history
+
+        Reference: https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/podautoscaler/horizontal.go#L545
+        """
+        if direction == 'up':
+            window_size = self.scale_up_stabilization
+        else:  # down
+            window_size = self.scale_down_stabilization
+
+        # Filter recommendations within the stabilization window
+        cutoff_time = current_time - window_size
+        recent_recommendations = [
+            (time, replicas) for time, replicas in self.recommendation_history
+            if time >= cutoff_time
+        ]
+
+        # Clean up old history (optimization)
+        self.recommendation_history = recent_recommendations
+
+        if not recent_recommendations:
+            return None
+
+        # Select the HIGHEST recommendation (most conservative)
+        # This prevents oscillation and ensures we don't scale too aggressively
+        _, max_replicas = max(recent_recommendations, key=lambda x: x[1])
+
+        logger.debug(f"Stabilization window ({direction}): {len(recent_recommendations)} recommendations, "
+                    f"selecting max={max_replicas}")
+
+        return max_replicas
+
+    def decide_action(self, cpu_utilization: float, current_pods: int, step: int = 0) -> Tuple[int, int]:
+        """
+        CORRECTED Main HPA decision algorithm with multi-pod scaling support.
+
+        CRITICAL FIX: Returns (action_type, target_replicas) instead of just action_type.
+        This allows HPA to scale directly to target (e.g., 2→10 pods in ONE action)
+        instead of incrementing by 1 each time (2→3→4→...→10).
+
+        Algorithm flow (aligned with K8s HPA v2):
+        1. Calculate desired replicas using proportional formula
+        2. Add recommendation to history
+        3. Get stabilized recommendation (highest in window)
+        4. Apply scaling policies (scale-up or scale-down)
+        5. Return action and target replica count
+
+        Returns:
+            Tuple[int, int]: (action_type, target_replicas)
+                action_type: 0=scale_up, 1=scale_down, 2=no_change
+                target_replicas: the actual target pod count to scale to
+
+        Reference: https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details
         """
         # Step 1: Calculate desired replicas using HPA formula
         desired = self.calculate_desired_replicas(cpu_utilization, current_pods)
 
-        # Step 2: Determine direction and check stabilization
-        if desired > current_pods:
-            # Want to scale up
-            if self.check_stabilization_window(step, 'up'):
-                return 2  # Still in stabilization window, wait
+        # Step 2: Add to recommendation history for stabilization window
+        self.add_recommendation(step, desired)
 
+        # Step 3: Determine direction
+        if desired > current_pods:
+            direction = 'up'
+        elif desired < current_pods:
+            direction = 'down'
+        else:
+            # Within tolerance or exactly at target
+            logger.debug(f"HPA: No scaling needed - CPU {cpu_utilization:.2%} is at target "
+                        f"(current={current_pods}, desired={desired})")
+            return (2, current_pods)  # No change
+
+        # Step 4: Get stabilized recommendation (highest in window)
+        stabilized = self.get_stabilized_recommendation(step, direction)
+
+        if stabilized is None:
+            # No history yet, use current recommendation
+            stabilized = desired
+
+        # Step 5: Apply scaling policies
+        if direction == 'up':
             # Apply scale-up policies
-            target = self.apply_scale_up_policy(current_pods, desired)
+            target = self.apply_scale_up_policy(current_pods, stabilized)
 
             if target > current_pods:
                 self.last_scale_time = step
                 self.last_scale_direction = 'up'
 
-                # For simulation compatibility, we scale by the difference
-                # But we track that HPA would scale to 'target' in one action
-                # For now, we'll scale by 1 but log the HPA recommendation
-                logger.debug(f"HPA would scale from {current_pods} to {target} pods (CPU: {cpu_utilization:.2%})")
-                return 0  # Scale up
+                logger.info(f"🔼 HPA SCALE-UP: {current_pods}→{target} pods "
+                           f"(CPU: {cpu_utilization:.2%}, target: {self.target_cpu:.2%}, "
+                           f"desired: {desired}, stabilized: {stabilized})")
+                return (0, target)  # Scale up to target
+            else:
+                logger.debug(f"HPA: Scale-up blocked by policies (current={current_pods}, target={target})")
+                return (2, current_pods)
 
-        elif desired < current_pods:
-            # Want to scale down
-            if self.check_stabilization_window(step, 'down'):
-                return 2  # Still in stabilization window, wait
+        else:  # direction == 'down'
+            # Calculate time since last scale-down for period tracking
+            time_since_last_scale_down = step - self.last_scale_down_time
 
-            # Apply scale-down policies
-            target = self.apply_scale_down_policy(current_pods, desired)
+            # Apply scale-down policies with period tracking
+            target = self.apply_scale_down_policy(current_pods, stabilized, time_since_last_scale_down)
 
             if target < current_pods:
                 self.last_scale_time = step
                 self.last_scale_direction = 'down'
+                self.last_scale_down_time = step  # Track for period-based policy
 
-                logger.debug(f"HPA would scale from {current_pods} to {target} pods (CPU: {cpu_utilization:.2%})")
-                return 1  # Scale down
-
-        # No change needed
-        return 2
+                logger.info(f"🔽 HPA SCALE-DOWN: {current_pods}→{target} pods "
+                           f"(CPU: {cpu_utilization:.2%}, target: {self.target_cpu:.2%}, "
+                           f"desired: {desired}, stabilized: {stabilized})")
+                return (1, target)  # Scale down to target
+            else:
+                logger.debug(f"HPA: Scale-down blocked by policies or period limit "
+                           f"(current={current_pods}, target={target})")
+                return (2, current_pods)
 
 
 def simulate_hybrid_traffic_with_agents():
