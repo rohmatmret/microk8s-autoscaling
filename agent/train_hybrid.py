@@ -22,8 +22,8 @@ import wandb
 from wandb.integration.sb3 import WandbCallback
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList, BaseCallback
 
-# Add agent directory to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'agent'))
+# Add project root to path to allow imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.hybrid_dqn_ppo import HybridDQNPPOAgent, HybridConfig
 from agent.hybrid_environment import HybridMicroK8sEnv
