@@ -48,7 +48,7 @@ case $AGENT_TYPE in
 
     hybrid)
         echo "Training Hybrid DQN-PPO Agent..."
-        python train_hybrid.py \
+        python agent/train_hybrid.py \
             --config config/paperspace_training.yaml \
             --mock \
             --steps $TIMESTEPS \
@@ -57,7 +57,7 @@ case $AGENT_TYPE in
 
     optimize)
         echo "Running Bayesian Hyperparameter Optimization..."
-        python train_hybrid.py \
+        python agent/train_hybrid.py \
             --config config/paperspace_training.yaml \
             --mock \
             --optimize \
@@ -82,6 +82,7 @@ echo "Logs available in: ./logs"
 echo "WandB dashboard: https://wandb.ai/your-entity/microk8s-autoscaling-paperspace"
 echo ""
 echo "Next steps:"
-echo "1. Download models: gradient notebooks artifacts download --id <notebook-id>"
-echo "2. Sync models to local: rsync or git-lfs"
+echo "1. Download models via web interface (Files tab) or:"
+echo "   ./scripts/sync_models_from_paperspace_web.sh root@<paperspace-host>"
+echo "2. Verify models: python verify_models.py"
 echo "3. Run local evaluation: python examples/hybrid_traffic_simulation.py"
